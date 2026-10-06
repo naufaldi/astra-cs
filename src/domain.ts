@@ -31,10 +31,16 @@ export type PriceTable = {
 
 /** The shape published by monitor.naufaldi.com `/api/pihps/fresh`. */
 export type FreshPayload = {
-  latestDate: string;
+  latestDate: string | null;
   dates: string[];
   prices: Record<string, number>;
 };
+
+export type DatedFreshPayload = FreshPayload & { latestDate: string };
+
+export function isDatedFresh(fresh: FreshPayload): fresh is DatedFreshPayload {
+  return fresh.latestDate !== null;
+}
 
 export type ReadResult =
   | { ok: true; table: PriceTable }

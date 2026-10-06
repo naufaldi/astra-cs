@@ -6,6 +6,29 @@ import { formatRequestLog } from "../src/agent/log.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
 
 const now = new Date("2026-10-06T03:00:00.000Z");
+const capturedFresh = JSON.parse(
+  readFileSync(new URL("./fixtures/fresh-beras-2026-10-05.json", import.meta.url), "utf8"),
+);
+
+async function askLive(text: string, draft: SessionDraft = emptyDraft(), claimed: HandoffRecord[] = []) {
+  const result = await handleVisitorMessage({
+    text,
+    draft,
+    readTable: (commodityId, dateToken) =>
+      readPriceTable({
+        source: "live",
+        commodityId,
+        dateToken,
+        fetchImpl: async () => Response.json(capturedFresh),
+      }),
+    writeHandoff: async (row) => {
+      claimed.push(row);
+    },
+    now,
+    requestId: "req-live",
+  });
+  return { result, claimed };
+}
 
 async function ask(text: string, draft: SessionDraft = emptyDraft(), claimed: HandoffRecord[] = []) {
   const fetchImpl = vi.fn();
@@ -142,6 +165,68 @@ describe("visitor questions", () => {
       tradingDate: "2026-10-05",
       errorClass: null,
     });
+  });
+});
+
+describe("live fresh overlay", () => {
+  it("phrases the Jakarta beras price from the captured payload", async () => {
+    const { result } = await askLive("harga beras di Jakarta");
+    expect(result.outcome).toBe("answered");
+    expect(result.reply).toContain("DKI Jakarta");
+    expect(result.reply).toContain("Rp16.950");
+    expect(result.reply).toContain("2026-10-05");
+    expect(result.reply.toLowerCase()).not.toContain("harga hari ini");
+    expect(result.draft.facts[0]?.harga).toBe(16950);
+  });
+
+  it("compares Jakarta and Bali, which the live payload prices", async () => {
+    const { result } = await askLive("bandingkan beras Jakarta dan Bali");
+    expect(result.outcome).toBe("answered");
+    expect(result.reply).toContain("DKI Jakarta");
+    expect(result.reply).toContain("Rp16.950");
+    expect(result.reply).toContain("Bali");
+    expect(result.reply).toContain("Rp16.050");
+  });
+
+  it("ranks the highest priced province and leaves out Papua Selatan", async () => {
+    const { result } = await askLive("beras termahal");
+    expect(result.outcome).toBe("answered");
+    expect(result.reply).toContain("Kalimantan Tengah");
+    expect(result.reply).toContain("Rp20.150");
+    expect(result.reply).toContain("dari 34 provinsi");
+    expect(result.reply).not.toContain("Papua Selatan");
+  });
+
+  it("names the nearest-50 average of the priced rows", async () => {
+    const { result } = await askLive("beras di Jakarta dibanding rata-rata");
+    expect(result.outcome).toBe("answered");
+    expect(result.reply).toContain("DKI Jakarta");
+    expect(result.reply).toContain("Rp16.950");
+    expect(result.reply).toContain("Rp16.400");
+  });
+
+  it("refuses a date on or before the baked snapshot cutoff", async () => {
+    const { result } = await askLive("harga beras di Jakarta tanggal 16 September 2026");
+    expect(result.outcome).toBe("refusal");
+    expect(result.log.errorClass).toBe("unpublished_date");
+    expect(result.reply).not.toMatch(/Rp/);
+  });
+
+  it("refuses a province the overlay does not price", async () => {
+    const { result } = await askLive("harga beras di Papua Selatan");
+    expect(result.outcome).toBe("refusal");
+    expect(result.log.errorClass).toBe("no_price");
+    expect(result.reply).not.toMatch(/Rp/);
+  });
+
+  it("writes a handoff from the live displayed price", async () => {
+    const claimed: HandoffRecord[] = [];
+    const { result } = await askLive("harga beras di Jakarta harusnya 12.000", emptyDraft(), claimed);
+    expect(result.outcome).toBe("handoff");
+    expect(result.reply).toContain("Rp16.950");
+    expect(claimed).toEqual([
+      { commodity: "Beras", province: "DKI Jakarta", displayedPrice: 16950, claimedPrice: 12000 },
+    ]);
   });
 });
 

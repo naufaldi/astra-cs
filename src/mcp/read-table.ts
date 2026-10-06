@@ -1,4 +1,4 @@
-import type { ReadResult } from "../domain.js";
+import { isDatedFresh, type ReadResult } from "../domain.js";
 import { readLiveFresh } from "./live-read.js";
 import { mockFresh } from "./mock-fresh.js";
 import { PriceCache } from "./price-cache.js";
@@ -13,23 +13,22 @@ export async function readPriceTable(options: {
   cache?: PriceCache;
 }): Promise<ReadResult> {
   if (options.source !== "live") {
-    const table = tableFromFresh(mockFresh, options.commodityId, options.dateToken, "mock");
-    if (table.ok && table.table.baris.length === 0) {
-      return { ok: false, error: "read_failed" };
+    if (!isDatedFresh(mockFresh)) {
+      return { ok: false, error: "unpublished_date" };
     }
-    return table;
+    return finishTable(tableFromFresh(mockFresh, options.commodityId, options.dateToken, "mock"));
   }
   const cache = options.cache ?? new PriceCache();
   try {
     const fresh = await readLiveFresh(options.fetchImpl);
+    if (!isDatedFresh(fresh)) {
+      return { ok: false, error: "unpublished_date" };
+    }
     const table = tableFromFresh(fresh, options.commodityId, options.dateToken, "live");
     if (table.ok && table.table.baris.length > 0) {
       cache.set(options.commodityId, table.table);
     }
-    if (table.ok && table.table.baris.length === 0) {
-      return { ok: false, error: "read_failed" };
-    }
-    return table;
+    return finishTable(table);
   } catch {
     const cached = cache.get(options.commodityId, options.dateToken === "terbaru" ? null : options.dateToken);
     if (!cached) {
@@ -37,4 +36,11 @@ export async function readPriceTable(options: {
     }
     return { ok: true, table: cached };
   }
+}
+
+function finishTable(table: ReadResult): ReadResult {
+  if (table.ok && table.table.baris.length === 0) {
+    return { ok: false, error: "read_failed" };
+  }
+  return table;
 }

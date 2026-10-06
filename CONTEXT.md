@@ -17,7 +17,7 @@ A visitor's request answered from exactly one price table: a province price, a c
 _Avoid_: Query, lookup, support ticket
 
 **Price table**:
-The published prices of one commodity on one trading date, by province, including each province's difference from the average.
+The published prices of one commodity on one trading date, by province, including each province's difference from the average. A province with no published price is absent from the table.
 _Avoid_: Dataset, snapshot, feed
 
 **Trading date**:
@@ -25,7 +25,7 @@ The date on a price table. It is a trading day, and the published price is not "
 _Avoid_: Today, realtime, last update
 
 **Latest trading date**:
-The most recent trading date Monitor Pangan publishes. It is the price table when the visitor names no date, or says today. The reply names that date.
+The most recent trading date on the fresh payload, the field `latestDate`. It is the price table when the visitor names no date, or says today. The reply names that date. A null `latestDate` means there is no price table to phrase.
 _Avoid_: Today, now, last update
 
 **Published name**:
@@ -69,7 +69,7 @@ A stored price table keyed by commodity and trading date. It contains no visitor
 _Avoid_: History, transcript
 
 **Price read**:
-The support agent's access to one price table. A province price names one province, a comparison names two, and a ranking names none. Commodity and trading date are always named. The raw message never identifies the read, and the model does not perform it.
+The support agent's access to one price table, read from the public fresh payload Monitor Pangan publishes. That payload is trading days after the baked snapshot, currently after 2026-09-16. It is not sample data, and it is not the baked history. A province price names one province, a comparison names two, and a ranking names none. Commodity and trading date are always named. The raw message never identifies the read, and the model does not perform it.
 _Avoid_: Query, lookup, scrape
 
 **Handler**:

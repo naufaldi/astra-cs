@@ -1,9 +1,8 @@
-import { nationalAverage, type FreshPayload, type PriceTable, type ReadResult } from "../domain.js";
+import { nationalAverage, type DatedFreshPayload, type PriceTable, type ReadResult } from "../domain.js";
 import { commodityById, provinces } from "./published-names.js";
 
-/** Build one price table from a fresh payload. Provinces without a price are absent. */
 export function tableFromFresh(
-  fresh: FreshPayload,
+  fresh: DatedFreshPayload,
   commodityId: string,
   dateToken: string,
   sumber: PriceTable["sumber"],

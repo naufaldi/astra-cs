@@ -16,7 +16,7 @@
     "run_worker_first": ["/chat", "/mcp", "/handoff"]
   },
   "vars": {
-    "PRICE_SOURCE": "mock"
+    "PRICE_SOURCE": "live"
   },
   "d1_databases": [
     {
