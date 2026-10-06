@@ -1,4 +1,5 @@
 import { emptyDraft, type PublicPriceFact, type SessionDraft } from "./domain.js";
+import { replies, replyLanguage } from "./agent/language.js";
 import { handleVisitorMessage } from "./agent/handle-request.js";
 import { insertHandoff, listHandoffs, type HandoffDb } from "./agent/handoff.js";
 import { formatRequestLog } from "./agent/log.js";
@@ -37,7 +38,7 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
   const text = typeof body === "object" && body !== null && "text" in body && typeof body.text === "string" ? body.text : "";
   const draft = sanitizeDraft(body);
   if (text.trim() === "") {
-    return Response.json({ reply: "Tulis pertanyaan harga.", draft, outcome: "refusal" }, { status: 400 });
+    return Response.json({ reply: replies[replyLanguage(text)].empty, draft, outcome: "refusal" }, { status: 400 });
   }
   const result = await handleVisitorMessage({
     text,

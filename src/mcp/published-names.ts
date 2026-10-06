@@ -83,6 +83,22 @@ const commodityAliases: readonly Alias[] = [
   { phrase: "minyak", id: "minyak-goreng" },
   { phrase: "beras", id: "beras" },
   { phrase: "ayam", id: "", ambiguous: true },
+  // English names for the same published rows. "chili" alone means Cabai Merah;
+  // Indonesian "cabai" without merah or rawit stays ambiguous.
+  { phrase: "red chili", id: "cabai-merah" },
+  { phrase: "red chilli", id: "cabai-merah" },
+  { phrase: "chili", id: "cabai-merah" },
+  { phrase: "chilli", id: "cabai-merah" },
+  { phrase: "shallot", id: "bawang-merah" },
+  { phrase: "shallots", id: "bawang-merah" },
+  { phrase: "garlic", id: "bawang-putih" },
+  { phrase: "cooking oil", id: "minyak-goreng" },
+  { phrase: "sugar", id: "gula-pasir" },
+  { phrase: "eggs", id: "telur-ayam" },
+  { phrase: "egg", id: "telur-ayam" },
+  { phrase: "chicken", id: "daging-ayam" },
+  { phrase: "beef", id: "daging-sapi" },
+  { phrase: "rice", id: "beras" },
 ];
 
 const provinceAliases: readonly { phrase: string; name: string }[] = [

@@ -1,11 +1,19 @@
 import { formatRupiah } from "../domain.js";
+import { replyLanguage, type ReplyLanguage } from "./language.js";
 import type { PhraseFacts } from "./select.js";
 
 export type WordingMessage = { role: "system" | "user"; content: string };
 export type WordingPayload = { messages: WordingMessage[] };
 
-const systemPrompt =
-  "Susun satu kalimat bahasa Indonesia hanya dari fakta harga yang diberikan. Sebut tanggal perdagangan. Jangan menyebut harga itu sebagai harga hari ini. Jangan menambah angka.";
+const indonesianPrompt =
+  "Susun satu kalimat bahasa Indonesia hanya dari fakta harga yang diberikan. Sebut tanggal perdagangan. Jangan menyebut harga itu sebagai harga hari ini. Jangan menambah angka. Jangan menulis baris sumber.";
+
+const englishPrompt =
+  "Write one English sentence using only the price facts given. Name the trading date. Do not call it today's price. Do not add numbers. Do not add a source line.";
+
+function promptFor(language: ReplyLanguage): string {
+  return language === "en" ? englishPrompt : indonesianPrompt;
+}
 
 /** Astra Flow model used when `ASTRAFLOW_MODEL` is unset or blank. */
 export const defaultAstraFlowModel = "deepseek-v4.1-flash";
@@ -29,14 +37,18 @@ export function buildWordingPayload(facts: PhraseFacts, rawText: string): Wordin
   const user = containsIdentity(rawText) ? `${factText}\n${rawText}` : factText;
   return {
     messages: [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: promptFor(replyLanguage(rawText)) },
       { role: "user", content: user },
     ],
   };
 }
 
 /** Phrase a resolved question without calling a model. */
-export function phraseFromFacts(facts: PhraseFacts): string {
+export function phraseFromFacts(facts: PhraseFacts, language: ReplyLanguage = "id"): string {
+  return language === "en" ? phraseEnglish(facts) : phraseIndonesian(facts);
+}
+
+function phraseIndonesian(facts: PhraseFacts): string {
   const dated = `pada tanggal perdagangan ${facts.date}`;
   const older = facts.date < facts.latestDate ? " Bukan harga hari ini." : "";
   switch (facts.kind) {
@@ -57,6 +69,26 @@ export function phraseFromFacts(facts: PhraseFacts): string {
   }
 }
 
+function phraseEnglish(facts: PhraseFacts): string {
+  const older = facts.date < facts.latestDate ? " Not today's price." : "";
+  switch (facts.kind) {
+    case "province":
+      return `On trading date ${facts.date}, the ${facts.commodity} price in ${facts.row.provinsi} is ${formatRupiah(facts.row.harga)} per ${facts.unit}.${older}`;
+    case "compare":
+      return `On trading date ${facts.date}, ${facts.commodity} is ${formatRupiah(facts.left.harga)} per ${facts.unit} in ${facts.left.provinsi} and ${formatRupiah(facts.right.harga)} per ${facts.unit} in ${facts.right.provinsi}.${older}`;
+    case "rank": {
+      const word = facts.direction === "high" ? "highest" : "lowest";
+      return `On trading date ${facts.date}, the ${word} ${facts.commodity} price is in ${facts.row.provinsi}, ${formatRupiah(facts.row.harga)} per ${facts.unit}, across ${facts.count} provinces with a price.${older}`;
+    }
+    case "versusAverage":
+      return `On trading date ${facts.date}, the ${facts.commodity} price in ${facts.row.provinsi} is ${formatRupiah(facts.row.harga)} per ${facts.unit}, against an average of ${formatRupiah(facts.average)} per ${facts.unit}.${older}`;
+    default: {
+      const unexpected: never = facts;
+      throw new Error(`unexpected facts ${JSON.stringify(unexpected)}`);
+    }
+  }
+}
+
 export type PhraseResult = { reply: string; payload: WordingPayload; calledAstra: boolean };
 
 /** Phrase with AstraFlow only when an API key is present. Otherwise use the fact template. */
@@ -65,9 +97,10 @@ export async function phraseResolved(
   rawText: string,
   options: { apiKey?: string; model?: string; fetchImpl?: typeof fetch },
 ): Promise<PhraseResult> {
+  const language = replyLanguage(rawText);
   const payload = buildWordingPayload(facts, rawText);
   if (!options.apiKey) {
-    return { reply: phraseFromFacts(facts), payload, calledAstra: false };
+    return { reply: phraseFromFacts(facts, language), payload, calledAstra: false };
   }
   const fetchImpl = options.fetchImpl ?? fetch;
   let response: Response;
