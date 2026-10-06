@@ -1,0 +1,24 @@
+{
+  "name": "monitor-pangan-support",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:exercise": "vitest run --config vitest.exercise.config.ts",
+    "types": "wrangler types",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
+  }
+}
