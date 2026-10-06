@@ -194,7 +194,13 @@ describe("ledger and admin", () => {
       const html = await page.text();
       expect(html).toContain("Added 5.00 credits to demo.");
       expect(html).not.toContain("workshop-test-key");
-      expect(html).not.toContain("<script>");
+      expect(html.match(/<script>/g)).toHaveLength(1);
+      expect(html).toContain("admin-refresh");
+      expect(html).toContain('href="/?tenant=demo"');
+      expect(html).toContain(">Chat as</a>");
+      expect(html).toContain('value="0"');
+      expect(html).toContain('name="preset" value="5"');
+      expect(html).toContain('name="preset" value="50"');
     } finally {
       fetchImpl.mockRestore();
       vi.useRealTimers();
@@ -261,6 +267,44 @@ describe("ledger and admin", () => {
       null,
     );
     expect(html).toContain("&lt;script&gt;");
+    expect(html.match(/<script>/g)).toHaveLength(1);
     expect(html).not.toContain("workshop-test-key");
+  });
+
+  it("starts a new tenant at zero, prefers preset top-ups, and does not create a missing tenant", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    const env = app(db);
+    const created = await postForm(env, "/admin/tenant", { tenant: "sim-zero", credits: "0" });
+    expect(created.status).toBe(303);
+    expect(created.headers.get("location")).toContain("notice=created");
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'sim-zero'").get()).toMatchObject({ balance: 0 });
+    expect(sqlite.prepare("SELECT delta_tokens, reason FROM credit_ledger WHERE tenant_id = 'sim-zero'").get()).toMatchObject({
+      delta_tokens: 0,
+      reason: "grant",
+    });
+
+    const preset = await postForm(env, "/admin/topup", { tenant: "sim-zero", preset: "5", credits: "99" });
+    expect(preset.status).toBe(303);
+    expect(preset.headers.get("location")).toContain("notice=topped");
+    expect(preset.headers.get("location")).toContain("credits=5");
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'sim-zero'").get()).toMatchObject({ balance: 5_000 });
+    expect(sqlite.prepare("SELECT reason, delta_tokens FROM credit_ledger WHERE tenant_id = 'sim-zero' AND reason = 'topup_fake'").get()).toMatchObject({
+      reason: "topup_fake",
+      delta_tokens: 5_000,
+    });
+
+    const missing = await postForm(env, "/admin/topup", { tenant: "not-here", credits: "5" });
+    expect(missing.status).toBe(303);
+    expect(missing.headers.get("location")).toContain("notice=missing");
+    expect(sqlite.prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = 'not-here'").get()).toBeUndefined();
+
+    const page = await handleFetch(
+      new Request("http://local/admin?notice=missing&tenant=not-here&credits=0", { headers: { authorization: basic("workshop-test-key") } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    const html = await page.text();
+    expect(html).toContain("not-here was not found. Create it first.");
+    expect(html).toContain('href="/?tenant=sim-zero"');
   });
 });

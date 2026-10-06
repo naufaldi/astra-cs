@@ -56,7 +56,7 @@ function usageLine(usage, credits, outcome) {
   const idr = Number(usage.estCostIdr) || 0;
   const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("en-US")}`;
   const charged = credits && typeof credits.chargedCredits === "number" ? `${credits.chargedCredits.toFixed(2)} credits charged` : "";
-  const left = credits && typeof credits.credits === "number" ? `${credits.credits.toFixed(2)} credits left` : "";
+  const left = credits && typeof credits.credits === "number" ? `Sisa kredit: ${credits.credits.toFixed(2)}` : "";
   return [outcome, `${tokens} tokens`, cost, charged, left].filter(Boolean).join(" · ");
 }
 
@@ -79,35 +79,108 @@ function addBubble(role, text, meta) {
   item.scrollIntoView({ block: "end" });
 }
 
+const tenantParam = new URLSearchParams(location.search).get("tenant")?.trim().toLowerCase() ?? "";
+const chip = document.querySelector("#tenant-chip");
+const sisa = document.querySelector("#sisa-kredit");
+const send = document.querySelector("#send");
+const retry = document.querySelector("#retry");
+chip.textContent = tenantParam || "demo";
+
+let locked = false;
+let lastText = "";
+
+function showSisa(left) {
+  if (typeof left !== "number" || Number.isNaN(left)) {
+    return;
+  }
+  sisa.hidden = false;
+  sisa.textContent = `Sisa kredit: ${left.toFixed(2)}`;
+}
+
+function lockComposer() {
+  locked = true;
+  field.disabled = true;
+  send.disabled = true;
+  retry.hidden = false;
+}
+
+function unlockComposer() {
+  locked = false;
+  field.disabled = false;
+  send.disabled = false;
+  retry.hidden = true;
+  field.focus();
+}
+
+async function sendChat(text, showVisitor) {
+  if (showVisitor) {
+    addBubble("visitor", text);
+  }
+  lastText = text;
+  send.disabled = true;
+  retry.disabled = true;
+  try {
+    const headers = { "content-type": "application/json" };
+    if (tenantParam) {
+      headers["x-tenant-id"] = tenantParam;
+    }
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text, draft: readDraft() }),
+    });
+    const body = await response.json();
+    saveDraft(body.draft ?? {});
+    const left = typeof body.credits_left === "number" ? body.credits_left : body.credits?.credits;
+    if (response.status !== 404) {
+      showSisa(left);
+    }
+    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits, body.outcome));
+    if (response.status === 402 || body.outcome === "402") {
+      lockComposer();
+      return;
+    }
+    if (response.ok) {
+      unlockComposer();
+      return;
+    }
+    send.disabled = locked;
+    if (!locked) {
+      field.focus();
+    }
+  } catch {
+    addBubble("agent", "Tabel harga tidak dapat dibaca.");
+    send.disabled = locked;
+    if (!locked) {
+      field.focus();
+    }
+  } finally {
+    retry.disabled = false;
+  }
+}
+
 const draft = readDraft();
 const restored = factsBubble(draft);
 addBubble("agent", restored || opening);
 
-form.addEventListener("submit", async (event) => {
+form.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (locked) {
+    return;
+  }
   const text = field.value.trim();
   if (!text) {
     return;
   }
   field.value = "";
-  addBubble("visitor", text);
-  const button = form.querySelector("button");
-  button.disabled = true;
-  try {
-    const response = await fetch("/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, draft: readDraft() }),
-    });
-    const body = await response.json();
-    saveDraft(body.draft ?? {});
-    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits, body.outcome));
-  } catch {
-    addBubble("agent", "Tabel harga tidak dapat dibaca.");
-  } finally {
-    button.disabled = false;
-    field.focus();
+  sendChat(text, true);
+});
+
+retry.addEventListener("click", () => {
+  if (!lastText || retry.disabled) {
+    return;
   }
+  sendChat(lastText, false);
 });
 
 field.addEventListener("keydown", (event) => {

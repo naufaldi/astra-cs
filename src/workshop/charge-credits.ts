@@ -90,10 +90,18 @@ export async function createTenant(
   return "created";
 }
 
-/** Fake top-up. The ledger row is the cash-in. */
-export async function topUpFake(db: HandoffDb, tenantId: string, creditCount: number, now: string): Promise<void> {
+/** Fake top-up. The ledger row is the cash-in. A missing tenant is not created. */
+export async function topUpFake(
+  db: HandoffDb,
+  tenantId: string,
+  creditCount: number,
+  now: string,
+): Promise<"ok" | "missing"> {
+  const existing = await readBalanceTokens(db, tenantId);
+  if (existing === null) {
+    return "missing";
+  }
   const tokens = Math.trunc(creditCount) * TOKENS_PER_CREDIT;
-  await ensureTenant(db, tenantId, now);
   await db.prepare("UPDATE tenant_credit SET balance = balance + ? WHERE tenant_id = ?").bind(tokens, tenantId).run();
   await insertLedger(db, {
     tenantId,
@@ -104,6 +112,7 @@ export async function topUpFake(db: HandoffDb, tenantId: string, creditCount: nu
     overdraftTokens: 0,
     now,
   });
+  return "ok";
 }
 
 /** Sum of balances minus sum of ledger deltas. Zero means the books match. */

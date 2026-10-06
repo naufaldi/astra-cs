@@ -15,11 +15,18 @@
         </div>
       </header>
       <ol id="transcript" class="transcript" aria-live="polite"></ol>
-      <form id="composer" class="composer">
-        <label class="sr" for="pesan">Pesan</label>
-        <textarea id="pesan" name="pesan" rows="1" placeholder="Tulis pertanyaan harga" required></textarea>
-        <button type="submit">Kirim</button>
-      </form>
+      <div class="composer-wrap">
+        <div class="composer-meta">
+          <p id="tenant-chip" class="chip"></p>
+          <p id="sisa-kredit" class="sisa" hidden>Sisa kredit: —</p>
+        </div>
+        <form id="composer" class="composer">
+          <label class="sr" for="pesan">Pesan</label>
+          <textarea id="pesan" name="pesan" rows="1" placeholder="Tulis pertanyaan harga" required></textarea>
+          <button id="send" type="submit">Kirim</button>
+          <button id="retry" type="button" hidden>Coba lagi</button>
+        </form>
+      </div>
     </main>
     <script src="/draft.js"></script>
   </body>

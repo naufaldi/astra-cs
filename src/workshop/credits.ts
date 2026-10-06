@@ -8,7 +8,7 @@
 import type { HandoffDb } from "../agent/handoff.js";
 import type { ReplyLanguage } from "../agent/language.js";
 import { ensureTenant } from "./charge-credits.js";
-import { GATE_TOKENS, TOKENS_PER_CREDIT, tokensToCredits } from "./credit-price.js";
+import { tokensToCredits } from "./credit-price.js";
 
 export const defaultTenantId = "demo";
 export const tenantHeader = "x-tenant-id";
@@ -19,6 +19,12 @@ const tenantSlug = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 export function tenantIdFrom(request: Request): string {
   const value = request.headers.get(tenantHeader)?.trim().toLowerCase() ?? "";
   return tenantSlug.test(value) ? value : defaultTenantId;
+}
+
+/** True when the visitor named a tenant. A blank header means the demo default. */
+export function namedTenantFrom(request: Request): string | null {
+  const value = request.headers.get(tenantHeader)?.trim().toLowerCase() ?? "";
+  return tenantSlug.test(value) ? value : null;
 }
 
 /** True when a form may use this id. Same shape as the chat header. */
@@ -40,6 +46,16 @@ export type CreditChargeView = CreditAccount & {
 /** Current token balance. An unknown tenant is created with zero tokens. */
 export async function readBalance(db: HandoffDb, tenantId: string): Promise<number> {
   return ensureTenant(db, tenantId, new Date().toISOString());
+}
+
+/** Balance for a tenant that already exists. Does not create a row. */
+export async function findBalance(db: HandoffDb, tenantId: string): Promise<number | null> {
+  const result = await db
+    .prepare("SELECT balance FROM tenant_credit WHERE tenant_id = ?")
+    .bind(tenantId)
+    .all<{ balance: number }>();
+  const row = result.results[0];
+  return row ? row.balance : null;
 }
 
 /** Every tenant balance, for the guarded credits route. */
@@ -75,12 +91,25 @@ export function parseCreditCount(value: string, allowZero: boolean): number | nu
 
 /** Friendly out-of-credits reply. The model is not called. */
 export function outOfCreditsReply(language: ReplyLanguage): string {
-  const credits = GATE_TOKENS / TOKENS_PER_CREDIT;
   switch (language) {
     case "en":
-      return `This demo is under ${credits} credits. Refusals and claims stay free. A price answer needs ${credits} credits (${GATE_TOKENS.toLocaleString("en-US")} tokens) before it starts.`;
+      return "Credits are used up. Contact the admin for a top-up.";
     case "id":
-      return `Kredit untuk tenant ini kurang dari ${credits}. Penolakan dan klaim tetap gratis. Jawaban harga butuh ${credits} kredit (${GATE_TOKENS.toLocaleString("id-ID")} token) sebelum dimulai.`;
+      return "Kredit habis. Hubungi admin untuk top up.";
+    default: {
+      const unexpected: never = language;
+      throw new Error(`unexpected language ${JSON.stringify(unexpected)}`);
+    }
+  }
+}
+
+/** Reply when `?tenant=` names an id that is not in the ledger. Nothing is created. */
+export function tenantNotFoundReply(language: ReplyLanguage): string {
+  switch (language) {
+    case "en":
+      return "Tenant not found";
+    case "id":
+      return "Tenant tidak ditemukan";
     default: {
       const unexpected: never = language;
       throw new Error(`unexpected language ${JSON.stringify(unexpected)}`);

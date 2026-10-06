@@ -9,7 +9,17 @@ import { renderAdmin, type AdminNotice } from "./admin/page.js";
 import { loadDashboard } from "./admin/queries.js";
 import { readTableThroughMcp } from "./mcp/client.js";
 import { chargeCredits, createTenant, topUpFake } from "./workshop/charge-credits.js";
-import { creditChargeView, isTenantSlug, listCredits, parseCreditCount, readBalance, tenantIdFrom } from "./workshop/credits.js";
+import {
+  creditChargeView,
+  findBalance,
+  isTenantSlug,
+  listCredits,
+  namedTenantFrom,
+  parseCreditCount,
+  readBalance,
+  tenantIdFrom,
+  tenantNotFoundReply,
+} from "./workshop/credits.js";
 import { isPeakUtc } from "./workshop/token-usage.js";
 import { insertRequestUsage } from "./workshop/usage-log.js";
 
@@ -60,8 +70,21 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
     return Response.json({ reply: replies[replyLanguage(text)].empty, draft, outcome: "refusal" }, { status: 400 });
   }
   // Workshop: usage and credits. Remove with src/workshop/.
-  const tenantId = tenantIdFrom(request);
-  const balance = await readBalance(env.DB, tenantId);
+  const named = namedTenantFrom(request);
+  const tenantId = named ?? tenantIdFrom(request);
+  let balance: number;
+  if (named) {
+    const found = await findBalance(env.DB, named);
+    if (found === null) {
+      return Response.json(
+        { reply: tenantNotFoundReply(replyLanguage(text)), draft, outcome: "refusal" },
+        { status: 404 },
+      );
+    }
+    balance = found;
+  } else {
+    balance = await readBalance(env.DB, tenantId);
+  }
   const result = await handleVisitorMessage({
     text,
     draft,
@@ -84,12 +107,15 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
   });
   console.log(formatRequestLog(result.log));
   const status = result.outcome === "402" ? 402 : 200;
+  const view = creditChargeView(tenantId, charge.balanceTokens, charge.chargedTokens);
   return Response.json({
     reply: result.reply,
     draft: result.draft,
     outcome: result.outcome,
     usage: result.usage,
-    credits: creditChargeView(tenantId, charge.balanceTokens, charge.chargedTokens),
+    credits: view,
+    balance_tokens: view.tokens,
+    credits_left: view.credits,
   }, { status });
 }
 
@@ -159,7 +185,10 @@ async function handleTopup(request: Request, env: AppBindings): Promise<Response
   if (!isTenantSlug(form.tenant) || credits === null) {
     return redirectAdmin("invalid", "", 0);
   }
-  await topUpFake(env.DB, form.tenant, credits, new Date().toISOString());
+  const topped = await topUpFake(env.DB, form.tenant, credits, new Date().toISOString());
+  if (topped === "missing") {
+    return redirectAdmin("missing", form.tenant, 0);
+  }
   return redirectAdmin("topped", form.tenant, credits);
 }
 
@@ -181,9 +210,10 @@ async function handleNewTenant(request: Request, env: AppBindings): Promise<Resp
 
 async function readAdminForm(request: Request): Promise<{ tenant: string; credits: string }> {
   const form = await request.formData();
+  const preset = String(form.get("preset") ?? "").trim();
   return {
     tenant: String(form.get("tenant") ?? "").trim().toLowerCase(),
-    credits: String(form.get("credits") ?? ""),
+    credits: preset || String(form.get("credits") ?? ""),
   };
 }
 
@@ -214,6 +244,7 @@ function noticeFrom(url: URL): AdminNotice {
     case "created":
       return { kind, tenantId, credits };
     case "exists":
+    case "missing":
       return { kind, tenantId };
     default:
       return null;

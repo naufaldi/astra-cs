@@ -1,5 +1,5 @@
 /**
- * Server-rendered admin page. No script, and no workshop key in the markup.
+ * Server-rendered admin page. One refresh script, and no workshop key in the markup.
  */
 
 import type { ChatRow, Dashboard, HandoffRow, TenantRow, Totals } from "./queries.js";
@@ -9,6 +9,7 @@ export type AdminNotice =
   | { kind: "topped"; tenantId: string; credits: number }
   | { kind: "created"; tenantId: string; credits: number }
   | { kind: "exists"; tenantId: string }
+  | { kind: "missing"; tenantId: string }
   | { kind: "invalid" }
   | null;
 
@@ -42,7 +43,11 @@ export function renderAdmin(data: Dashboard, notice: AdminNotice): string {
     .forms { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     label { display: block; margin: 10px 0 4px; color: #44403c; }
     input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d6d3d1; border-radius: 8px; font: inherit; }
-    button { margin-top: 12px; background: #1c1917; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; }
+    button { margin-top: 12px; background: #1c1917; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; }
+    .presets { display: flex; flex-wrap: wrap; gap: 8px; }
+    a { color: #9a3412; }
+    .refresh { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .refresh input { width: auto; }
     .empty { color: #78716c; padding: 12px 0; }
   </style>
 </head>
@@ -50,6 +55,7 @@ export function renderAdmin(data: Dashboard, notice: AdminNotice): string {
 <main>
   <h1>Credits admin</h1>
   <p class="lede">One credit is 1,000 tokens and sells for Rp${CREDIT_PRICE_IDR}. Astra Flow cost is shown in USD and in rupiah at 16,500 per dollar. The credit price stays flat when the model rate doubles, so the margin shrinks at peak.</p>
+  <label class="refresh"><input id="auto-refresh" type="checkbox" checked> Refresh every 5 seconds</label>
   ${noticeHtml(notice)}
   <section id="totals">
     <div class="cards">
@@ -77,19 +83,39 @@ export function renderAdmin(data: Dashboard, notice: AdminNotice): string {
       <label for="topup-tenant">Tenant</label>
       <input id="topup-tenant" name="tenant" required maxlength="40" autocomplete="off">
       <label for="topup-credits">Credits</label>
-      <input id="topup-credits" name="credits" type="number" min="1" step="1" value="5" required>
-      <button type="submit">Add credits</button>
+      <input id="topup-credits" name="credits" type="number" min="1" step="1" placeholder="Custom">
+      <div class="presets">
+        <button type="submit" name="preset" value="5">+5</button>
+        <button type="submit" name="preset" value="50">+50</button>
+        <button type="submit">Add credits</button>
+      </div>
     </form>
     <form id="new-tenant" class="panel" method="post" action="/admin/tenant">
       <h2>New tenant</h2>
       <label for="new-tenant-id">Tenant id</label>
       <input id="new-tenant-id" name="tenant" required maxlength="40" autocomplete="off">
       <label for="new-tenant-credits">Starting credits</label>
-      <input id="new-tenant-credits" name="credits" type="number" min="0" step="1" value="10" required>
+      <input id="new-tenant-credits" name="credits" type="number" min="0" step="1" value="0" required>
       <button type="submit">Create tenant</button>
     </form>
   </section>
 </main>
+<script>
+(function () {
+  var box = document.getElementById("auto-refresh");
+  if (!box) return;
+  if (sessionStorage.getItem("admin-refresh") === "off") box.checked = false;
+  box.addEventListener("change", function () {
+    sessionStorage.setItem("admin-refresh", box.checked ? "on" : "off");
+  });
+  setInterval(function () {
+    if (!box.checked) return;
+    var active = document.activeElement;
+    if (active && active.closest && active.closest("form")) return;
+    location.reload();
+  }, 5000);
+})();
+</script>
 </body>
 </html>`;
 }
@@ -119,11 +145,12 @@ function tenantTable(rows: TenantRow[]): string {
         <td>${rupiah(row.earnedIdr)}</td>
         <td>${rupiah(row.costIdr)}</td>
         <td>${rupiah(row.marginIdr)}</td>
+        <td><a href="/?tenant=${encodeURIComponent(row.tenantId)}" target="_blank" rel="noopener">Chat as</a></td>
       </tr>`,
     )
     .join("");
   return `<table>
-    <thead><tr><th>Tenant</th><th>Balance</th><th>Credits used</th><th>Earned</th><th>Cost</th><th>Margin</th></tr></thead>
+    <thead><tr><th>Tenant</th><th>Balance</th><th>Credits used</th><th>Earned</th><th>Cost</th><th>Margin</th><th>Chat</th></tr></thead>
     <tbody>${body}</tbody>
   </table>`;
 }
@@ -189,6 +216,8 @@ function noticeText(notice: Exclude<AdminNotice, null>): string {
       return `Created ${notice.tenantId} with ${notice.credits.toFixed(2)} credits.`;
     case "exists":
       return `${notice.tenantId} already exists.`;
+    case "missing":
+      return `${notice.tenantId} was not found. Create it first.`;
     case "invalid":
       return "Check the tenant id and the credit amount.";
     default: {

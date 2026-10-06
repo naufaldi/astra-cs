@@ -5,7 +5,7 @@ import { openWorkshopDb, seedTenant } from "./sqlite-db.js";
 import { handleVisitorMessage } from "../src/agent/handle-request.js";
 import { handleFetch, type AppBindings } from "../src/routes.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
-import { outOfCreditsReply, tenantIdFrom } from "../src/workshop/credits.js";
+import { namedTenantFrom, outOfCreditsReply, tenantIdFrom, tenantNotFoundReply } from "../src/workshop/credits.js";
 import { projectMonthly } from "../src/workshop/cost-projection.js";
 import { readEstimateFlags, resolveSample } from "../scripts/cost-estimate.js";
 import { isPeakUtc, priceTokens, readTokenUsage, zeroUsage } from "../src/workshop/token-usage.js";
@@ -129,6 +129,9 @@ describe("tenant credits", () => {
     expect(tenantIdFrom(new Request("http://local/chat"))).toBe("demo");
     expect(tenantIdFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "ACME_1" } }))).toBe("acme_1");
     expect(tenantIdFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "../etc" } }))).toBe("demo");
+    expect(namedTenantFrom(new Request("http://local/chat"))).toBeNull();
+    expect(namedTenantFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "Sim-Day" } }))).toBe("sim-day");
+    expect(namedTenantFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "../etc" } }))).toBeNull();
   });
 
   it("refuses a price question in the visitor's language and does not call the model", async () => {
@@ -257,6 +260,8 @@ describe("chat route", () => {
       const answered = await first.json() as {
         usage: { promptTokens: number; completionTokens: number; totalTokens: number; estCostUsd: number };
         credits: { tenantId: string; tokens: number; credits: number; chargedTokens: number; chargedCredits: number };
+        balance_tokens: number;
+        credits_left: number;
       };
       expect(answered.usage).toMatchObject({ promptTokens: 180, completionTokens: 60, totalTokens: 240 });
       expect(answered.usage.estCostUsd).toBeGreaterThan(0);
@@ -267,6 +272,8 @@ describe("chat route", () => {
         chargedTokens: 240,
         chargedCredits: 0.24,
       });
+      expect(answered.balance_tokens).toBe(4_760);
+      expect(answered.credits_left).toBe(4.76);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       const refused = await postChat(env, "How do I cook rice?", { "x-tenant-id": "low" });
@@ -285,6 +292,37 @@ describe("chat route", () => {
       expect(stored).not.toContain("Jakarta");
       expect(stored).toContain("180");
       expect(stored).toContain("402");
+    } finally {
+      fetchImpl.mockRestore();
+    }
+  });
+
+  it("returns not-found for a named tenant that does not exist and creates nothing", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    const env = app(db, { ASTRAFLOW_API_KEY: "test-key" });
+    const fetchImpl = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    });
+    try {
+      const before = sqlite.prepare("SELECT COUNT(*) AS n FROM tenant_credit").get() as { n: number };
+      const indonesian = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "sim-missing" });
+      expect(indonesian.status).toBe(404);
+      const idBody = await indonesian.json() as { reply: string; outcome: string };
+      expect(idBody.reply).toBe(tenantNotFoundReply("id"));
+      expect(idBody.outcome).toBe("refusal");
+      expect(idBody).not.toHaveProperty("balance_tokens");
+
+      const english = await postChat(env, "What's the price of rice?", { "x-tenant-id": "sim-missing" });
+      expect(english.status).toBe(404);
+      const enBody = await english.json() as { reply: string };
+      expect(enBody.reply).toBe(tenantNotFoundReply("en"));
+
+      const after = sqlite.prepare("SELECT COUNT(*) AS n FROM tenant_credit").get() as { n: number };
+      expect(after.n).toBe(before.n);
+      expect(sqlite.prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = 'sim-missing'").get()).toBeUndefined();
+      expect(sqlite.prepare("SELECT COUNT(*) AS n FROM request_usage").get()).toMatchObject({ n: 0 });
+      expect(fetchImpl).not.toHaveBeenCalled();
     } finally {
       fetchImpl.mockRestore();
     }

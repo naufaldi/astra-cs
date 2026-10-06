@@ -66,14 +66,43 @@ body {
 .visitor { align-self: flex-end; background: var(--ink); color: var(--canvas); border-bottom-right-radius: 4px; }
 .visitor time { color: #d6d3d1; }
 
+.composer-wrap {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.composer-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 12px 0;
+}
+
+.chip {
+  margin: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--canvas);
+  font-size: 0.75rem;
+}
+
+.sisa {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--slate);
+}
+
 .composer {
   display: flex;
   gap: 8px;
   padding: 12px;
-  border-top: 1px solid var(--line);
   background: var(--paper);
-  flex: none;
 }
+
+#retry[hidden],
+.sisa[hidden] { display: none; }
 
 textarea {
   flex: 1;
