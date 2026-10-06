@@ -23,15 +23,15 @@ body {
 .thread {
   display: flex;
   flex-direction: column;
-  min-height: 100dvh;
+  height: 100dvh;
   max-width: 720px;
   margin: 0 auto;
   background: rgb(255 252 247 / 72%);
+  overflow: hidden;
 }
 
 .bar {
-  position: sticky;
-  top: 0;
+  flex: none;
   padding: 14px 16px;
   background: var(--ink);
   color: var(--canvas);
@@ -48,6 +48,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
 }
 
 .bubble {
@@ -70,8 +71,7 @@ body {
   padding: 12px;
   border-top: 1px solid var(--line);
   background: var(--paper);
-  position: sticky;
-  bottom: 0;
+  flex: none;
 }
 
 textarea {
