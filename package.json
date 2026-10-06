@@ -1,0 +1,14 @@
+{
+  "name": "monitor-pangan-support",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:exercise": "vitest run --config vitest.exercise.config.ts",
+    "types": "wrangler types",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  }
+}

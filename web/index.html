@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dukungan Monitor Pangan</title>
+    <link rel="stylesheet" href="/chat.css" />
+  </head>
+  <body>
+    <main class="thread">
+      <header class="bar">
+        <div>
+          <p class="name">Dukungan Monitor Pangan</p>
+          <p class="status">Satu tabel harga · tanggal perdagangan</p>
+        </div>
+      </header>
+      <ol id="transcript" class="transcript" aria-live="polite"></ol>
+      <form id="composer" class="composer">
+        <label class="sr" for="pesan">Pesan</label>
+        <textarea id="pesan" name="pesan" rows="1" placeholder="Tulis pertanyaan harga" required></textarea>
+        <button type="submit">Kirim</button>
+      </form>
+    </main>
+    <script src="/draft.js"></script>
+  </body>
+</html>
