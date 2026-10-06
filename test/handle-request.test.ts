@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { emptyDraft, type HandoffRecord, type SessionDraft } from "../src/domain.js";
 import { handleVisitorMessage } from "../src/agent/handle-request.js";
+import { defaultAstraFlowModel } from "../src/agent/phrase.js";
 import { formatRequestLog } from "../src/agent/log.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
 
@@ -150,6 +151,78 @@ describe("visitor questions", () => {
     expect(claimed[0]?.claimedPrice).toBe(14000);
     expect(claimed[0]?.displayedPrice).toBe(15700);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("calls AstraFlow with the default DeepSeek V4 model unless overridden", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        choices: [{ message: { content: "Pada tanggal perdagangan 2026-10-05, harga Beras di Aceh adalah Rp15.700 per kg." } }],
+      }),
+    );
+    const result = await handleVisitorMessage({
+      text: "harga beras di Aceh",
+      draft: emptyDraft(),
+      readTable: (commodityId, dateToken) => readPriceTable({ source: "mock", commodityId, dateToken }),
+      writeHandoff: async () => undefined,
+      apiKey: "test-key",
+      fetchImpl,
+      now,
+      requestId: "req-model",
+    });
+    const init = fetchImpl.mock.calls[0]?.[1];
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    expect(body.model).toBe(defaultAstraFlowModel);
+    expect(body.model).toBe("deepseek-v4.1-flash");
+    expect(result.log.errorClass).toBeNull();
+    expect(result.outcome).toBe("answered");
+
+    const override = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        choices: [{ message: { content: "Pada tanggal perdagangan 2026-10-05, harga Beras di Aceh adalah Rp15.700 per kg." } }],
+      }),
+    );
+    await handleVisitorMessage({
+      text: "harga beras di Aceh",
+      draft: emptyDraft(),
+      readTable: (commodityId, dateToken) => readPriceTable({ source: "mock", commodityId, dateToken }),
+      writeHandoff: async () => undefined,
+      apiKey: "test-key",
+      model: "custom-model",
+      fetchImpl: override,
+      now,
+      requestId: "req-override",
+    });
+    const overrideBody = JSON.parse(String(override.mock.calls[0]?.[1]?.body)) as { model: string };
+    expect(overrideBody.model).toBe("custom-model");
+  });
+
+  it("logs the upstream wording error class and message", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        { error: { message: "Invalid param: model rejected", code: "param_error", type: "invalid_request_error" } },
+        { status: 400 },
+      ),
+    );
+    const result = await handleVisitorMessage({
+      text: "Berapa harga beras di Aceh?",
+      draft: emptyDraft(),
+      readTable: (commodityId, dateToken) => readPriceTable({ source: "mock", commodityId, dateToken }),
+      writeHandoff: async () => undefined,
+      apiKey: "test-key",
+      fetchImpl,
+      now,
+      requestId: "req-upstream",
+    });
+    expect(result.outcome).toBe("refusal");
+    expect(result.reply).toBe("Jawaban harga tidak dapat disusun.");
+    const line = formatRequestLog(result.log);
+    expect(JSON.parse(line)).toMatchObject({
+      errorClass: "wording_unavailable",
+      upstreamClass: "param_error",
+      upstreamMessage: "Invalid param: model rejected",
+    });
+    expect(line).not.toContain("Berapa harga");
+    expect(line).not.toContain("test-key");
   });
 
   it("keeps the request log free of the message, reply, and claimed price", async () => {

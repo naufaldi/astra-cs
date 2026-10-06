@@ -1,3 +1,4 @@
 ASTRAFLOW_API_KEY=
+# Optional override. Leave blank to use deepseek-v4.1-flash.
 ASTRAFLOW_MODEL=
 WORKSHOP_KEY=
