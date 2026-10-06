@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { renderAdmin } from "../src/admin/page.js";
 import { loadDashboard, totalsFrom } from "../src/admin/queries.js";
@@ -6,6 +7,7 @@ import { handleVisitorMessage } from "../src/agent/handle-request.js";
 import { emptyDraft } from "../src/domain.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
 import { ledgerGap, passesCreditGate, planCharge } from "../src/workshop/charge-credits.js";
+import { balanceBadge, creditInputMessage, nameInputMessage, slugFromName, validateCreditInput, validateTenantName } from "../src/workshop/credits.js";
 import { CREDIT_PRICE_IDR, tokensToSen } from "../src/workshop/credit-price.js";
 import { estimateCost, modelPrice } from "../src/workshop/token-usage.js";
 import { openWorkshopDb, seedTenant } from "./sqlite-db.js";
@@ -139,10 +141,11 @@ describe("ledger and admin", () => {
     try {
       const priced = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "low" });
       expect(priced.status).toBe(200);
-      const body = await priced.json() as { credits: { chargedTokens: number; tokens: number }; usage: { estCostUsd: number; estCostIdr: number } };
-      expect(body.credits.chargedTokens).toBe(240);
-      expect(body.credits.tokens).toBe(2_260);
-      expect(body.usage).toMatchObject({ estCostUsd: 0.00006006 * 2, estCostIdr: 2 });
+      const body = await priced.json() as { reply: string; outcome: string };
+      expect(body.outcome).toBe("answered");
+      expect(body).not.toHaveProperty("usage");
+      expect(body).not.toHaveProperty("credits");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 2_260 });
       const ledger = sqlite.prepare("SELECT delta_tokens, reason, idr_amount, chat_ref FROM credit_ledger WHERE tenant_id = 'low' AND reason = 'usage'").get() as {
         delta_tokens: number;
         reason: string;
@@ -158,17 +161,18 @@ describe("ledger and admin", () => {
       };
       expect(usage).toMatchObject({ total_tokens: 240, charged_tokens: 240, peak: 1, reasoning_tokens: 40, outcome: "answered" });
 
-      const topped = await postForm(env, "/admin/topup", { tenant: "demo", credits: "5" });
+      const topped = await postForm(env, "/admin/topup", { tenant: "demo", credits: "5", idempotency_key: crypto.randomUUID() });
       expect(topped.status).toBe(303);
-      expect(topped.headers.get("location")).toContain("notice=topped");
+      expect(topped.headers.get("location")).toContain("ok=topup");
       expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 55_000 });
       expect(sqlite.prepare("SELECT delta_tokens, idr_amount FROM credit_ledger WHERE reason = 'topup_fake'").get()).toMatchObject({
         delta_tokens: 5_000,
         idr_amount: 50_000,
       });
 
-      const created = await postForm(env, "/admin/tenant", { tenant: "kios", credits: "10" });
+      const created = await postForm(env, "/admin/tenant", { name: "Kios", credits: "10", idempotency_key: crypto.randomUUID() });
       expect(created.status).toBe(303);
+      expect(created.headers.get("location")).toContain("tenant=kios");
       const fresh = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "kios" });
       expect(fresh.status).toBe(200);
       expect(await ledgerGap(db)).toBe(0);
@@ -186,21 +190,25 @@ describe("ledger and admin", () => {
       expect(totalsFrom(dashboard.allTime.tokens, dashboard.allTime.chargedTokens, dashboard.allTime.costIdr, 500).marginIdr).toBe(dashboard.allTime.marginIdr);
 
       const page = await handleFetch(
-        new Request("http://local/admin?notice=topped&tenant=demo&credits=5", { headers: { authorization: basic("workshop-test-key") } }),
+        new Request("http://local/admin?ok=topup&tenant=demo&credits=5", { headers: { authorization: basic("workshop-test-key") } }),
         env,
         async () => new Response("mcp"),
       );
       expect(page.status).toBe(200);
       const html = await page.text();
-      expect(html).toContain("Added 5.00 credits to demo.");
+      expect(html).toContain("+5 kredit ditambahkan ke demo. Saldo baru: 55.00 kredit.");
       expect(html).not.toContain("workshop-test-key");
+      expect(html).not.toContain("Fake top-up");
       expect(html.match(/<script>/g)).toHaveLength(1);
       expect(html).toContain("admin-refresh");
+      expect(html).toContain("Auto-refresh dijeda");
       expect(html).toContain('href="/?tenant=demo"');
       expect(html).toContain(">Chat as</a>");
+      expect(html).toContain(">Top up</button>");
       expect(html).toContain('value="0"');
-      expect(html).toContain('name="preset" value="5"');
-      expect(html).toContain('name="preset" value="50"');
+      expect(html).toContain('data-preset="5"');
+      expect(html).toContain('data-preset="50"');
+      expect(html).toContain('data-preset="100"');
     } finally {
       fetchImpl.mockRestore();
       vi.useRealTimers();
@@ -221,8 +229,7 @@ describe("ledger and admin", () => {
     try {
       const response = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "edge" });
       expect(response.status).toBe(200);
-      const body = await response.json() as { credits: { chargedTokens: number; tokens: number } };
-      expect(body.credits).toMatchObject({ chargedTokens: 2_100, tokens: 0 });
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'edge'").get()).toMatchObject({ balance: 0 });
       expect(sqlite.prepare("SELECT delta_tokens, overdraft_tokens FROM credit_ledger WHERE reason = 'usage'").get()).toMatchObject({
         delta_tokens: -2_100,
         overdraft_tokens: 1_900,
@@ -274,18 +281,19 @@ describe("ledger and admin", () => {
   it("starts a new tenant at zero, prefers preset top-ups, and does not create a missing tenant", async () => {
     const { db, sqlite } = openWorkshopDb();
     const env = app(db);
-    const created = await postForm(env, "/admin/tenant", { tenant: "sim-zero", credits: "0" });
+    const created = await postForm(env, "/admin/tenant", { name: "Sim Zero", credits: "0", idempotency_key: crypto.randomUUID() });
     expect(created.status).toBe(303);
-    expect(created.headers.get("location")).toContain("notice=created");
-    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'sim-zero'").get()).toMatchObject({ balance: 0 });
+    expect(created.headers.get("location")).toContain("ok=created");
+    expect(created.headers.get("location")).toContain("tenant=sim-zero");
+    expect(sqlite.prepare("SELECT balance, name FROM tenant_credit WHERE tenant_id = 'sim-zero'").get()).toMatchObject({ balance: 0, name: "Sim Zero" });
     expect(sqlite.prepare("SELECT delta_tokens, reason FROM credit_ledger WHERE tenant_id = 'sim-zero'").get()).toMatchObject({
       delta_tokens: 0,
       reason: "grant",
     });
 
-    const preset = await postForm(env, "/admin/topup", { tenant: "sim-zero", preset: "5", credits: "99" });
+    const preset = await postForm(env, "/admin/topup", { tenant: "sim-zero", credits: "5", idempotency_key: crypto.randomUUID() });
     expect(preset.status).toBe(303);
-    expect(preset.headers.get("location")).toContain("notice=topped");
+    expect(preset.headers.get("location")).toContain("ok=topup");
     expect(preset.headers.get("location")).toContain("credits=5");
     expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'sim-zero'").get()).toMatchObject({ balance: 5_000 });
     expect(sqlite.prepare("SELECT reason, delta_tokens FROM credit_ledger WHERE tenant_id = 'sim-zero' AND reason = 'topup_fake'").get()).toMatchObject({
@@ -293,18 +301,77 @@ describe("ledger and admin", () => {
       delta_tokens: 5_000,
     });
 
-    const missing = await postForm(env, "/admin/topup", { tenant: "not-here", credits: "5" });
-    expect(missing.status).toBe(303);
-    expect(missing.headers.get("location")).toContain("notice=missing");
+    const missing = await postForm(env, "/admin/topup", { tenant: "not-here", credits: "5", idempotency_key: crypto.randomUUID() });
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: "Tenant tidak ditemukan. Muat ulang halaman." });
     expect(sqlite.prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = 'not-here'").get()).toBeUndefined();
 
     const page = await handleFetch(
-      new Request("http://local/admin?notice=missing&tenant=not-here&credits=0", { headers: { authorization: basic("workshop-test-key") } }),
+      new Request("http://local/admin?ok=created&tenant=sim-zero", { headers: { authorization: basic("workshop-test-key") } }),
       env,
       async () => new Response("mcp"),
     );
     const html = await page.text();
-    expect(html).toContain("not-here was not found. Create it first.");
+    expect(html).toContain("Tenant &quot;Sim Zero&quot; dibuat · saldo 5 kredit.");
     expect(html).toContain('href="/?tenant=sim-zero"');
+    expect(html).toContain("Hampir habis");
+  });
+
+  it("rejects bad top-up amounts, credits a double submit once, and badges balances", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    seedTenant(sqlite, "blocked", 1_500);
+    seedTenant(sqlite, "lowish", 5_000);
+    seedTenant(sqlite, "penuh", 50_000);
+    const env = app(db);
+    for (const credits of ["", "0", "-3", "2.5", "10001"]) {
+      const rejected = await postForm(env, "/admin/topup", { tenant: "demo", credits, idempotency_key: crypto.randomUUID() });
+      expect(rejected.status).toBe(400);
+    }
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 50_000 });
+    const parsed = validateCreditInput("2.5", false);
+    expect(parsed).toEqual({ error: "whole" });
+    if ("error" in parsed) expect(creditInputMessage(parsed.error)).toBe("Jumlah harus bilangan bulat lebih dari 0.");
+    const tooBig = validateCreditInput("10001", false);
+    if ("error" in tooBig) expect(creditInputMessage(tooBig.error)).toBe("Maksimal 10.000 kredit per top up.");
+    const emptyName = validateTenantName(" ");
+    if ("error" in emptyName) expect(nameInputMessage(emptyName.error)).toBe("Isi nama tenant.");
+    expect(slugFromName("Warung Bu Sri")).toBe("warung-bu-sri");
+
+    const duplicate = await postForm(env, "/admin/tenant", { name: "demo", credits: "0", idempotency_key: crypto.randomUUID() });
+    expect(duplicate.status).toBe(400);
+    expect(await duplicate.json()).toMatchObject({ error: nameInputMessage("taken") });
+
+    const key = crypto.randomUUID();
+    const [first, second] = await Promise.all([
+      postForm(env, "/admin/topup", { tenant: "demo", credits: "50", idempotency_key: key }),
+      postForm(env, "/admin/topup", { tenant: "demo", credits: "50", idempotency_key: key }),
+    ]);
+    expect(first.status).toBe(303);
+    expect(second.status).toBe(303);
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 100_000 });
+    expect(sqlite.prepare("SELECT COUNT(*) AS n FROM credit_ledger WHERE idempotency_key = ?").get(key)).toMatchObject({ n: 1 });
+
+    expect(balanceBadge(1_500)).toBe("blocked");
+    expect(balanceBadge(5_000)).toBe("low");
+    expect(balanceBadge(50_000)).toBeNull();
+    const page = await handleFetch(
+      new Request("http://local/admin", { headers: { authorization: basic("workshop-test-key") } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    const html = await page.text();
+    expect(html).toContain("1.50 <span class=\"badge blocked\">Diblokir</span>");
+    expect(html).toContain("5.00 <span class=\"badge low\">Hampir habis</span>");
+    expect(html).not.toContain("50.00 <span class=\"badge");
+    expect(html).not.toContain("<form id=\"topup\"");
+
+    const dashboard = await loadDashboard(db, offPeak);
+    const empty = renderAdmin({ ...dashboard, tenants: [] }, null);
+    expect(empty).toContain("Belum ada tenant.");
+    expect(empty).toContain("Buat tenant pertama untuk mulai mencoba chat.");
+    expect(empty).toContain("+ Tenant baru");
+
+    const customer = ["index.html", "draft.js", "chat.css"].map((name) => readFileSync(new URL(`../web/${name}`, import.meta.url), "utf8")).join("\n");
+    expect(customer).not.toMatch(/\b(tokens?|kredits?|credits?|cost|sisa)\b/i);
   });
 });

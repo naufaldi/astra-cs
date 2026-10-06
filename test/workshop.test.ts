@@ -224,9 +224,11 @@ describe("chat route", () => {
     const env = app(db);
     const response = await postChat(env, "How do I cook rice?");
     expect(response.status).toBe(200);
-    const body = await response.json() as { usage: { totalTokens: number }; credits: { tenantId: string; tokens: number; credits: number; chargedTokens: number } };
-    expect(body.usage.totalTokens).toBe(0);
-    expect(body.credits).toEqual({ tenantId: "demo", tokens: 50_000, credits: 50, chargedTokens: 0, chargedCredits: 0 });
+    const body = await response.json() as { reply: string; outcome: string };
+    expect(body.outcome).toBe("refusal");
+    expect(body).not.toHaveProperty("usage");
+    expect(body).not.toHaveProperty("credits");
+    expect(body).not.toHaveProperty("balance_tokens");
     expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 50_000 });
     expect(JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all())).not.toContain("cook");
 
@@ -257,36 +259,29 @@ describe("chat route", () => {
     try {
       const first = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "low" });
       expect(first.status).toBe(200);
-      const answered = await first.json() as {
-        usage: { promptTokens: number; completionTokens: number; totalTokens: number; estCostUsd: number };
-        credits: { tenantId: string; tokens: number; credits: number; chargedTokens: number; chargedCredits: number };
-        balance_tokens: number;
-        credits_left: number;
-      };
-      expect(answered.usage).toMatchObject({ promptTokens: 180, completionTokens: 60, totalTokens: 240 });
-      expect(answered.usage.estCostUsd).toBeGreaterThan(0);
-      expect(answered.credits).toEqual({
-        tenantId: "low",
-        tokens: 4_760,
-        credits: 4.76,
-        chargedTokens: 240,
-        chargedCredits: 0.24,
+      const answered = await first.json() as { reply: string; outcome: string };
+      expect(answered.outcome).toBe("answered");
+      expect(answered).not.toHaveProperty("usage");
+      expect(answered).not.toHaveProperty("credits_left");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 4_760 });
+      expect(sqlite.prepare("SELECT total_tokens, est_cost_usd FROM request_usage WHERE tenant_id = 'low'").get()).toMatchObject({
+        total_tokens: 240,
       });
-      expect(answered.balance_tokens).toBe(4_760);
-      expect(answered.credits_left).toBe(4.76);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       const refused = await postChat(env, "How do I cook rice?", { "x-tenant-id": "low" });
       expect(refused.status).toBe(200);
-      const free = await refused.json() as { credits: { tokens: number; chargedTokens: number } };
-      expect(free.credits).toMatchObject({ tenantId: "low", tokens: 4_760, chargedTokens: 0 });
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 4_760 });
 
       const blocked = await postChat(env, "What's the price of rice in Jakarta?", { "x-tenant-id": "thin" });
       expect(blocked.status).toBe(402);
-      const body = await blocked.json() as { outcome: string; reply: string; credits: { tokens: number; chargedTokens: number } };
+      const body = await blocked.json() as { outcome: string; reply: string };
       expect(body.outcome).toBe("402");
       expect(body.reply).toBe(outOfCreditsReply("en"));
-      expect(body.credits).toMatchObject({ tenantId: "thin", tokens: 1_000, chargedTokens: 0 });
+      expect(body.reply.toLowerCase()).not.toContain("kredit");
+      expect(body.reply.toLowerCase()).not.toContain("credit");
+      expect(body.reply.toLowerCase()).not.toContain("admin");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'thin'").get()).toMatchObject({ balance: 1_000 });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
       const stored = JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all());
       expect(stored).not.toContain("Jakarta");

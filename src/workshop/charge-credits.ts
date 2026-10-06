@@ -61,6 +61,7 @@ export async function chargeCredits(
     sen: tokensToSen(plan.chargedTokens),
     overdraftTokens: plan.overdraftTokens,
     now,
+    idempotencyKey: null,
   });
   return plan;
 }
@@ -71,47 +72,90 @@ export async function ensureTenant(db: HandoffDb, tenantId: string, now: string)
   if (existing !== null) {
     return existing;
   }
-  await writeGrant(db, tenantId, 0, now);
+  await writeGrant(db, tenantId, tenantId, 0, now, null);
   return 0;
 }
 
-/** Opening balance for a new tenant. `grant` is not cash. */
+/** Opening balance for a new tenant. `grant` is not cash. A repeated key does not create a second row. */
 export async function createTenant(
   db: HandoffDb,
   tenantId: string,
+  name: string,
   creditCount: number,
   now: string,
-): Promise<"created" | "exists"> {
-  const existing = await readBalanceTokens(db, tenantId);
-  if (existing !== null) {
+  idempotencyKey: string,
+): Promise<"created" | "exists" | "replay"> {
+  if (await readIdempotent(db, idempotencyKey)) {
+    return "replay";
+  }
+  if (await nameTaken(db, tenantId, name)) {
     return "exists";
   }
-  await writeGrant(db, tenantId, Math.trunc(creditCount) * TOKENS_PER_CREDIT, now);
+  const tokens = Math.trunc(creditCount) * TOKENS_PER_CREDIT;
+  try {
+    await db
+      .prepare("INSERT INTO tenant_credit (tenant_id, balance, name, created_at) VALUES (?, ?, ?, ?)")
+      .bind(tenantId, tokens, name, now)
+      .run();
+  } catch {
+    return (await readIdempotent(db, idempotencyKey)) ? "replay" : "exists";
+  }
+  try {
+    await insertLedger(db, {
+      tenantId,
+      deltaTokens: tokens,
+      reason: "grant",
+      chatRef: null,
+      sen: 0,
+      overdraftTokens: 0,
+      now,
+      idempotencyKey,
+    });
+  } catch {
+    if (await readIdempotent(db, idempotencyKey)) {
+      return "replay";
+    }
+    await db.prepare("DELETE FROM tenant_credit WHERE tenant_id = ?").bind(tenantId).run();
+    throw new Error("tenant grant was not recorded");
+  }
   return "created";
 }
 
-/** Fake top-up. The ledger row is the cash-in. A missing tenant is not created. */
+/** Fake top-up. The ledger row is the cash-in. A missing tenant is not created. A repeated key credits once. */
 export async function topUpFake(
   db: HandoffDb,
   tenantId: string,
   creditCount: number,
   now: string,
-): Promise<"ok" | "missing"> {
+  idempotencyKey: string,
+): Promise<"ok" | "missing" | "replay"> {
+  if (await readIdempotent(db, idempotencyKey)) {
+    return "replay";
+  }
   const existing = await readBalanceTokens(db, tenantId);
   if (existing === null) {
     return "missing";
   }
   const tokens = Math.trunc(creditCount) * TOKENS_PER_CREDIT;
   await db.prepare("UPDATE tenant_credit SET balance = balance + ? WHERE tenant_id = ?").bind(tokens, tenantId).run();
-  await insertLedger(db, {
-    tenantId,
-    deltaTokens: tokens,
-    reason: "topup_fake",
-    chatRef: null,
-    sen: tokensToSen(tokens),
-    overdraftTokens: 0,
-    now,
-  });
+  try {
+    await insertLedger(db, {
+      tenantId,
+      deltaTokens: tokens,
+      reason: "topup_fake",
+      chatRef: null,
+      sen: tokensToSen(tokens),
+      overdraftTokens: 0,
+      now,
+      idempotencyKey,
+    });
+  } catch {
+    await db.prepare("UPDATE tenant_credit SET balance = balance - ? WHERE tenant_id = ?").bind(tokens, tenantId).run();
+    if (await readIdempotent(db, idempotencyKey)) {
+      return "replay";
+    }
+    throw new Error("top-up was not recorded");
+  }
   return "ok";
 }
 
@@ -122,8 +166,18 @@ export async function ledgerGap(db: HandoffDb): Promise<number> {
   return balances - deltas;
 }
 
-async function writeGrant(db: HandoffDb, tenantId: string, tokens: number, now: string): Promise<void> {
-  await db.prepare("INSERT INTO tenant_credit (tenant_id, balance) VALUES (?, ?)").bind(tenantId, tokens).run();
+async function writeGrant(
+  db: HandoffDb,
+  tenantId: string,
+  name: string,
+  tokens: number,
+  now: string,
+  idempotencyKey: string | null,
+): Promise<void> {
+  await db
+    .prepare("INSERT INTO tenant_credit (tenant_id, balance, name, created_at) VALUES (?, ?, ?, ?)")
+    .bind(tenantId, tokens, name, now)
+    .run();
   await insertLedger(db, {
     tenantId,
     deltaTokens: tokens,
@@ -132,7 +186,24 @@ async function writeGrant(db: HandoffDb, tenantId: string, tokens: number, now: 
     sen: 0,
     overdraftTokens: 0,
     now,
+    idempotencyKey,
   });
+}
+
+async function nameTaken(db: HandoffDb, tenantId: string, name: string): Promise<boolean> {
+  const result = await db
+    .prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = ? OR lower(name) = lower(?)")
+    .bind(tenantId, name)
+    .all<{ tenant_id: string }>();
+  return result.results.length > 0;
+}
+
+async function readIdempotent(db: HandoffDb, idempotencyKey: string): Promise<boolean> {
+  const result = await db
+    .prepare("SELECT id FROM credit_ledger WHERE idempotency_key = ?")
+    .bind(idempotencyKey)
+    .all<{ id: number }>();
+  return result.results.length > 0;
 }
 
 async function readBalanceTokens(db: HandoffDb, tenantId: string): Promise<number | null> {
@@ -156,15 +227,25 @@ async function insertLedger(
     sen: number;
     overdraftTokens: number;
     now: string;
+    idempotencyKey: string | null;
   },
 ): Promise<void> {
   await db
     .prepare(
       `INSERT INTO credit_ledger (
-        tenant_id, delta_tokens, reason, chat_ref, idr_amount, overdraft_tokens, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        tenant_id, delta_tokens, reason, chat_ref, idr_amount, overdraft_tokens, created_at, idempotency_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(row.tenantId, row.deltaTokens, row.reason, row.chatRef, row.sen, row.overdraftTokens, row.now)
+    .bind(
+      row.tenantId,
+      row.deltaTokens,
+      row.reason,
+      row.chatRef,
+      row.sen,
+      row.overdraftTokens,
+      row.now,
+      row.idempotencyKey,
+    )
     .run();
 }
 

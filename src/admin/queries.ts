@@ -19,6 +19,7 @@ export type Totals = {
 
 export type TenantRow = {
   tenantId: string;
+  name: string;
   balanceTokens: number;
   balanceCredits: number;
   creditsUsed: number;
@@ -57,7 +58,7 @@ export type Dashboard = {
 
 type SumRow = { tokens: number; charged: number; cost: number };
 type CashRow = { sen: number };
-type TenantSql = { tenant_id: string; balance: number; charged: number; cost: number };
+type TenantSql = { tenant_id: string; name: string; balance: number; charged: number; cost: number };
 type ChatSql = {
   time: string;
   tenant_id: string;
@@ -123,6 +124,7 @@ async function loadTenants(db: HandoffDb): Promise<TenantRow[]> {
   const result = await db
     .prepare(
       `SELECT c.tenant_id AS tenant_id,
+              CASE WHEN c.name = '' THEN c.tenant_id ELSE c.name END AS name,
               c.balance AS balance,
               COALESCE(u.charged, 0) AS charged,
               COALESCE(u.cost, 0) AS cost
@@ -132,7 +134,7 @@ async function loadTenants(db: HandoffDb): Promise<TenantRow[]> {
          FROM request_usage
          GROUP BY tenant_id
        ) u ON u.tenant_id = c.tenant_id
-       ORDER BY c.tenant_id`,
+       ORDER BY c.created_at DESC, c.tenant_id`,
     )
     .bind()
     .all<TenantSql>();
@@ -140,6 +142,7 @@ async function loadTenants(db: HandoffDb): Promise<TenantRow[]> {
     const earnedIdr = (row.charged * CREDIT_PRICE_IDR) / TOKENS_PER_CREDIT;
     return {
       tenantId: row.tenant_id,
+      name: row.name,
       balanceTokens: row.balance,
       balanceCredits: row.balance / TOKENS_PER_CREDIT,
       creditsUsed: row.charged / TOKENS_PER_CREDIT,

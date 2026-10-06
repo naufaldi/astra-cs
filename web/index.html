@@ -10,23 +10,16 @@
     <main class="thread">
       <header class="bar">
         <div>
-          <p class="name">Dukungan Monitor Pangan</p>
+          <p class="name" id="brand">Dukungan Monitor Pangan</p>
           <p class="status">Satu tabel harga · tanggal perdagangan</p>
         </div>
       </header>
       <ol id="transcript" class="transcript" aria-live="polite"></ol>
-      <div class="composer-wrap">
-        <div class="composer-meta">
-          <p id="tenant-chip" class="chip"></p>
-          <p id="sisa-kredit" class="sisa" hidden>Sisa kredit: —</p>
-        </div>
-        <form id="composer" class="composer">
-          <label class="sr" for="pesan">Pesan</label>
-          <textarea id="pesan" name="pesan" rows="1" placeholder="Tulis pertanyaan harga" required></textarea>
-          <button id="send" type="submit">Kirim</button>
-          <button id="retry" type="button" hidden>Coba lagi</button>
-        </form>
-      </div>
+      <form id="composer" class="composer">
+        <label class="sr" for="pesan">Pesan</label>
+        <textarea id="pesan" name="pesan" rows="1" placeholder="Tulis pertanyaan harga" required></textarea>
+        <button id="send" type="submit">Kirim</button>
+      </form>
     </main>
     <script src="/draft.js"></script>
   </body>

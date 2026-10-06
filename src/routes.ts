@@ -10,16 +10,22 @@ import { loadDashboard } from "./admin/queries.js";
 import { readTableThroughMcp } from "./mcp/client.js";
 import { chargeCredits, createTenant, topUpFake } from "./workshop/charge-credits.js";
 import {
-  creditChargeView,
+  creditInputMessage,
+  defaultTenantId,
   findBalance,
+  findTenantName,
+  isIdempotencyKey,
   isTenantSlug,
   listCredits,
+  nameInputMessage,
   namedTenantFrom,
-  parseCreditCount,
   readBalance,
   tenantIdFrom,
   tenantNotFoundReply,
+  validateCreditInput,
+  validateTenantName,
 } from "./workshop/credits.js";
+import { tokensToCredits } from "./workshop/credit-price.js";
 import { isPeakUtc } from "./workshop/token-usage.js";
 import { insertRequestUsage } from "./workshop/usage-log.js";
 
@@ -40,6 +46,9 @@ export async function handleFetch(request: Request, env: AppBindings, mcp: (requ
   }
   if (url.pathname === "/chat" && request.method === "POST") {
     return handleChat(request, env);
+  }
+  if (url.pathname === "/brand" && request.method === "GET") {
+    return handleBrand(url, env);
   }
   if (url.pathname === "/handoff" && request.method === "GET") {
     return handleHandoff(request, env);
@@ -107,16 +116,24 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
   });
   console.log(formatRequestLog(result.log));
   const status = result.outcome === "402" ? 402 : 200;
-  const view = creditChargeView(tenantId, charge.balanceTokens, charge.chargedTokens);
   return Response.json({
     reply: result.reply,
     draft: result.draft,
     outcome: result.outcome,
-    usage: result.usage,
-    credits: view,
-    balance_tokens: view.tokens,
-    credits_left: view.credits,
   }, { status });
+}
+
+async function handleBrand(url: URL, env: AppBindings): Promise<Response> {
+  const raw = url.searchParams.get("tenant")?.trim().toLowerCase() ?? "";
+  const tenantId = raw === "" ? defaultTenantId : isTenantSlug(raw) ? raw : null;
+  if (!tenantId) {
+    return Response.json({ error: "missing" }, { status: 404 });
+  }
+  const name = await findTenantName(env.DB, tenantId);
+  if (!name) {
+    return Response.json({ error: "missing" }, { status: 404 });
+  }
+  return Response.json({ name });
 }
 
 async function handleCredits(request: Request, env: AppBindings): Promise<Response> {
@@ -171,7 +188,7 @@ async function handleAdmin(request: Request, env: AppBindings, url: URL): Promis
     return unauthorized();
   }
   const dashboard = await loadDashboard(env.DB, new Date());
-  return new Response(renderAdmin(dashboard, noticeFrom(url)), {
+  return new Response(renderAdmin(dashboard, noticeFrom(url, dashboard)), {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
 }
@@ -181,15 +198,21 @@ async function handleTopup(request: Request, env: AppBindings): Promise<Response
     return unauthorized();
   }
   const form = await readAdminForm(request);
-  const credits = parseCreditCount(form.credits, false);
-  if (!isTenantSlug(form.tenant) || credits === null) {
-    return redirectAdmin("invalid", "", 0);
+  if (!isIdempotencyKey(form.idempotencyKey)) {
+    return failAdmin(creditInputMessage("whole"));
   }
-  const topped = await topUpFake(env.DB, form.tenant, credits, new Date().toISOString());
+  const parsed = validateCreditInput(form.credits, false);
+  if ("error" in parsed) {
+    return failAdmin(creditInputMessage(parsed.error));
+  }
+  if (!isTenantSlug(form.tenant)) {
+    return failAdmin("Tenant tidak ditemukan. Muat ulang halaman.");
+  }
+  const topped = await topUpFake(env.DB, form.tenant, parsed.count, new Date().toISOString(), form.idempotencyKey);
   if (topped === "missing") {
-    return redirectAdmin("missing", form.tenant, 0);
+    return failAdmin("Tenant tidak ditemukan. Muat ulang halaman.");
   }
-  return redirectAdmin("topped", form.tenant, credits);
+  return succeedAdmin(request, topupLocation(form.tenant, parsed.count));
 }
 
 async function handleNewTenant(request: Request, env: AppBindings): Promise<Response> {
@@ -197,58 +220,68 @@ async function handleNewTenant(request: Request, env: AppBindings): Promise<Resp
     return unauthorized();
   }
   const form = await readAdminForm(request);
-  const credits = parseCreditCount(form.credits, true);
-  if (!isTenantSlug(form.tenant) || credits === null) {
-    return redirectAdmin("invalid", "", 0);
+  if (!isIdempotencyKey(form.idempotencyKey)) {
+    return failAdmin(nameInputMessage("length"));
   }
-  const created = await createTenant(env.DB, form.tenant, credits, new Date().toISOString());
+  const name = validateTenantName(form.name);
+  if ("error" in name) {
+    return failAdmin(nameInputMessage(name.error));
+  }
+  const parsed = validateCreditInput(form.credits, true);
+  if ("error" in parsed) {
+    return failAdmin(creditInputMessage(parsed.error));
+  }
+  const created = await createTenant(env.DB, name.slug, name.name, parsed.count, new Date().toISOString(), form.idempotencyKey);
   if (created === "exists") {
-    return redirectAdmin("exists", form.tenant, credits);
+    return failAdmin(nameInputMessage("taken"));
   }
-  return redirectAdmin("created", form.tenant, credits);
+  return succeedAdmin(request, `/admin?ok=created&tenant=${encodeURIComponent(name.slug)}`);
 }
 
-async function readAdminForm(request: Request): Promise<{ tenant: string; credits: string }> {
+async function readAdminForm(request: Request): Promise<{ tenant: string; name: string; credits: string; idempotencyKey: string }> {
   const form = await request.formData();
-  const preset = String(form.get("preset") ?? "").trim();
   return {
     tenant: String(form.get("tenant") ?? "").trim().toLowerCase(),
-    credits: preset || String(form.get("credits") ?? ""),
+    name: String(form.get("name") ?? ""),
+    credits: String(form.get("credits") ?? ""),
+    idempotencyKey: String(form.get("idempotency_key") ?? "").trim(),
   };
 }
 
-function redirectAdmin(notice: string, tenant: string, credits: number): Response {
-  const query = new URLSearchParams({ notice });
-  if (tenant) {
-    query.set("tenant", tenant);
-    query.set("credits", String(credits));
+function topupLocation(tenantId: string, credits: number): string {
+  const query = new URLSearchParams({ ok: "topup", tenant: tenantId, credits: String(credits) });
+  return `/admin?${query}`;
+}
+
+function succeedAdmin(request: Request, location: string): Response {
+  if (request.headers.get("accept")?.includes("application/json")) {
+    return Response.json({ redirect: location });
   }
   return new Response(null, {
     status: 303,
-    headers: { location: `/admin?${query}`, "cache-control": "no-store" },
+    headers: { location, "cache-control": "no-store" },
   });
 }
 
-function noticeFrom(url: URL): AdminNotice {
-  const kind = url.searchParams.get("notice");
-  if (kind === "invalid") {
-    return { kind: "invalid" };
-  }
+function failAdmin(error: string): Response {
+  return Response.json({ error }, { status: 400 });
+}
+
+function noticeFrom(url: URL, dashboard: Awaited<ReturnType<typeof loadDashboard>>): AdminNotice {
+  const ok = url.searchParams.get("ok");
   const tenantId = url.searchParams.get("tenant") ?? "";
-  const credits = Number(url.searchParams.get("credits"));
-  if (!isTenantSlug(tenantId) || !Number.isInteger(credits)) {
+  const row = dashboard.tenants.find((tenant) => tenant.tenantId === tenantId);
+  if (!row || (ok !== "topup" && ok !== "created")) {
     return null;
   }
-  switch (kind) {
-    case "topped":
-    case "created":
-      return { kind, tenantId, credits };
-    case "exists":
-    case "missing":
-      return { kind, tenantId };
-    default:
-      return null;
+  if (ok === "created") {
+    return { kind: "created", name: row.name, tenantId, credits: tokensToCredits(row.balanceTokens) };
   }
+  const credits = Number(url.searchParams.get("credits"));
+  if (!Number.isInteger(credits) || credits < 1 || credits > 10_000) {
+    return null;
+  }
+  return { kind: "topup", name: row.name, tenantId, credits, balanceCredits: tokensToCredits(row.balanceTokens) };
 }
 
 function guardedFetch(apiKey: string | undefined): typeof fetch {

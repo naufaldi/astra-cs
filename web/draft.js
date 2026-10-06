@@ -47,20 +47,7 @@ function factsBubble(draft) {
   return lines.join("\n");
 }
 
-function usageLine(usage, credits, outcome) {
-  if (!usage) {
-    return "";
-  }
-  const tokens = Number(usage.totalTokens) || 0;
-  const usd = Number(usage.estCostUsd) || 0;
-  const idr = Number(usage.estCostIdr) || 0;
-  const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("en-US")}`;
-  const charged = credits && typeof credits.chargedCredits === "number" ? `${credits.chargedCredits.toFixed(2)} credits charged` : "";
-  const left = credits && typeof credits.credits === "number" ? `Sisa kredit: ${credits.credits.toFixed(2)}` : "";
-  return [outcome, `${tokens} tokens`, cost, charged, left].filter(Boolean).join(" · ");
-}
-
-function addBubble(role, text, meta) {
+function addBubble(role, text) {
   const item = document.createElement("li");
   item.className = `bubble ${role}`;
   const paragraph = document.createElement("p");
@@ -69,61 +56,88 @@ function addBubble(role, text, meta) {
   time.dateTime = new Date().toISOString();
   time.textContent = new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date());
   item.append(paragraph, time);
-  if (meta) {
-    const note = document.createElement("p");
-    note.className = "meta";
-    note.textContent = meta;
-    item.append(note);
-  }
   transcript.append(item);
   item.scrollIntoView({ block: "end" });
 }
 
 const tenantParam = new URLSearchParams(location.search).get("tenant")?.trim().toLowerCase() ?? "";
-const chip = document.querySelector("#tenant-chip");
-const sisa = document.querySelector("#sisa-kredit");
+const brand = document.querySelector("#brand");
 const send = document.querySelector("#send");
-const retry = document.querySelector("#retry");
-chip.textContent = tenantParam || "demo";
-
-let locked = false;
+const slugPattern = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 let lastText = "";
+let known = true;
 
-function showSisa(left) {
-  if (typeof left !== "number" || Number.isNaN(left)) {
+function englishMessage(text) {
+  return /\b(what|price|rice|how|where|the)\b/i.test(text);
+}
+
+function addNotice(title, detail, buttonLabel) {
+  const item = document.createElement("li");
+  item.className = "bubble system";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const paragraph = document.createElement("p");
+  paragraph.textContent = detail;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = buttonLabel;
+  button.addEventListener("click", () => {
+    if (lastText) sendChat(lastText, false);
+  });
+  item.append(heading, paragraph, button);
+  transcript.append(item);
+  item.scrollIntoView({ block: "end" });
+}
+
+function showUnavailable(text) {
+  if (englishMessage(text)) {
+    addNotice("Sorry, chat is temporarily unavailable.", "Please try again in a moment.", "Try again");
     return;
   }
-  sisa.hidden = false;
-  sisa.textContent = `Sisa kredit: ${left.toFixed(2)}`;
+  addNotice("Maaf, layanan chat sedang tidak tersedia.", "Silakan coba lagi beberapa saat lagi.", "Coba lagi");
 }
 
-function lockComposer() {
-  locked = true;
-  field.disabled = true;
-  send.disabled = true;
-  retry.hidden = false;
+function showOutage(text) {
+  if (englishMessage(text)) {
+    addNotice("Sorry, something went wrong.", "Try again.", "Try again");
+    return;
+  }
+  addNotice("Maaf, terjadi gangguan.", "Coba lagi.", "Coba lagi");
 }
 
-function unlockComposer() {
-  locked = false;
-  field.disabled = false;
-  send.disabled = false;
-  retry.hidden = true;
-  field.focus();
+async function loadBrand() {
+  if (tenantParam && !slugPattern.test(tenantParam)) {
+    known = false;
+    addBubble("agent", "Layanan ini tidak ditemukan.");
+    return;
+  }
+  const query = tenantParam ? `?tenant=${encodeURIComponent(tenantParam)}` : "";
+  try {
+    const response = await fetch(`/brand${query}`);
+    if (!response.ok) {
+      known = false;
+      addBubble("agent", englishMessage(tenantParam) ? "This service was not found." : "Layanan ini tidak ditemukan.");
+      return;
+    }
+    const body = await response.json();
+    if (body.name) brand.textContent = `Dukungan Monitor Pangan · ${body.name}`;
+  } catch {
+    known = false;
+  }
 }
 
 async function sendChat(text, showVisitor) {
-  if (showVisitor) {
-    addBubble("visitor", text);
+  if (!known) {
+    if (showVisitor) addBubble("visitor", text);
+    addBubble("agent", englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan.");
+    return;
   }
+  if (showVisitor) addBubble("visitor", text);
   lastText = text;
   send.disabled = true;
-  retry.disabled = true;
   try {
     const headers = { "content-type": "application/json" };
-    if (tenantParam) {
-      headers["x-tenant-id"] = tenantParam;
-    }
+    if (tenantParam) headers["x-tenant-id"] = tenantParam;
     const response = await fetch("/chat", {
       method: "POST",
       headers,
@@ -131,31 +145,20 @@ async function sendChat(text, showVisitor) {
     });
     const body = await response.json();
     saveDraft(body.draft ?? {});
-    const left = typeof body.credits_left === "number" ? body.credits_left : body.credits?.credits;
-    if (response.status !== 404) {
-      showSisa(left);
-    }
-    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits, body.outcome));
     if (response.status === 402 || body.outcome === "402") {
-      lockComposer();
+      showUnavailable(text);
       return;
     }
-    if (response.ok) {
-      unlockComposer();
+    if (!response.ok) {
+      addBubble("agent", body.reply ?? (englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan."));
       return;
     }
-    send.disabled = locked;
-    if (!locked) {
-      field.focus();
-    }
+    addBubble("agent", body.reply ?? (englishMessage(text) ? "The price table could not be read." : "Tabel harga tidak dapat dibaca."));
   } catch {
-    addBubble("agent", "Tabel harga tidak dapat dibaca.");
-    send.disabled = locked;
-    if (!locked) {
-      field.focus();
-    }
+    showOutage(text);
   } finally {
-    retry.disabled = false;
+    send.disabled = false;
+    field.focus();
   }
 }
 
@@ -165,9 +168,6 @@ addBubble("agent", restored || opening);
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (locked) {
-    return;
-  }
   const text = field.value.trim();
   if (!text) {
     return;
@@ -176,12 +176,7 @@ form.addEventListener("submit", (event) => {
   sendChat(text, true);
 });
 
-retry.addEventListener("click", () => {
-  if (!lastText || retry.disabled) {
-    return;
-  }
-  sendChat(lastText, false);
-});
+loadBrand();
 
 field.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
