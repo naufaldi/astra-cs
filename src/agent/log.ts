@@ -11,5 +11,8 @@ export function formatRequestLog(line: RequestLog): string {
     priceReadMs: line.priceReadMs,
     wordingMs: line.wordingMs,
     errorClass: line.errorClass,
+    ...(line.upstreamClass
+      ? { upstreamClass: line.upstreamClass, upstreamMessage: line.upstreamMessage ?? "" }
+      : {}),
   });
 }

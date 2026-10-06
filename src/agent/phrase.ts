@@ -7,6 +7,22 @@ export type WordingPayload = { messages: WordingMessage[] };
 const systemPrompt =
   "Susun satu kalimat bahasa Indonesia hanya dari fakta harga yang diberikan. Sebut tanggal perdagangan. Jangan menyebut harga itu sebagai harga hari ini. Jangan menambah angka.";
 
+/** Astra Flow model used when `ASTRAFLOW_MODEL` is unset or blank. */
+export const defaultAstraFlowModel = "deepseek-v4.1-flash";
+
+/** A wording call that Astra Flow did not complete. The message is the upstream error, not visitor text. */
+export class WordingUnavailable extends Error {
+  readonly upstreamClass: string;
+  readonly upstreamMessage: string;
+
+  constructor(upstreamClass: string, upstreamMessage: string) {
+    super("wording unavailable");
+    this.name = "WordingUnavailable";
+    this.upstreamClass = upstreamClass;
+    this.upstreamMessage = upstreamMessage;
+  }
+}
+
 /** Build the AstraFlow payload from resolved facts. A name or phone is still copied through. */
 export function buildWordingPayload(facts: PhraseFacts, rawText: string): WordingPayload {
   const factText = JSON.stringify(wordingFacts(facts));
@@ -54,27 +70,81 @@ export async function phraseResolved(
     return { reply: phraseFromFacts(facts), payload, calledAstra: false };
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl("https://api-sg.umodelverse.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${options.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: options.model ?? "deepseek-ai/DeepSeek-V3",
-      messages: payload.messages,
-      stream: false,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl("https://api-sg.umodelverse.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: resolvedModel(options.model),
+        messages: payload.messages,
+        stream: false,
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "network";
+    throw new WordingUnavailable("network", sanitizeUpstreamMessage(message));
+  }
   if (!response.ok) {
-    throw new Error("wording unavailable");
+    throw await wordingFailure(response);
   }
   const body: unknown = await response.json();
   const reply = completionText(body);
   if (!reply) {
-    throw new Error("wording unavailable");
+    throw new WordingUnavailable("empty_completion", "AstraFlow returned no reply text");
   }
   return { reply, payload, calledAstra: true };
+}
+
+function resolvedModel(model: string | undefined): string {
+  const override = model?.trim();
+  return override ? override : defaultAstraFlowModel;
+}
+
+async function wordingFailure(response: Response): Promise<WordingUnavailable> {
+  const fallbackClass = `http_${response.status}`;
+  let text = "";
+  try {
+    text = await response.text();
+  } catch {
+    return new WordingUnavailable(fallbackClass, `HTTP ${response.status}`);
+  }
+  const parsed = upstreamError(text);
+  if (!parsed) {
+    return new WordingUnavailable(fallbackClass, `HTTP ${response.status}`);
+  }
+  return new WordingUnavailable(parsed.className, sanitizeUpstreamMessage(parsed.message));
+}
+
+function upstreamError(text: string): { className: string; message: string } | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null || !("error" in body)) {
+    return null;
+  }
+  const error = (body as { error: unknown }).error;
+  if (typeof error !== "object" || error === null) {
+    return null;
+  }
+  const record = error as Record<string, unknown>;
+  const code = typeof record.code === "string" && record.code.trim() !== "" ? record.code : null;
+  const type = typeof record.type === "string" && record.type.trim() !== "" ? record.type : null;
+  const message = typeof record.message === "string" && record.message.trim() !== "" ? record.message : null;
+  if (!message) {
+    return null;
+  }
+  return { className: code ?? type ?? "upstream", message };
+}
+
+function sanitizeUpstreamMessage(message: string): string {
+  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 function wordingFacts(facts: PhraseFacts): Record<string, unknown> {

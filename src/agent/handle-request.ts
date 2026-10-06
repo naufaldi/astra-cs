@@ -7,7 +7,7 @@ import {
   type SessionDraft,
 } from "../domain.js";
 import { factsFromPhrase, provincesFromPhrase, selectRows } from "./select.js";
-import { phraseResolved, type WordingPayload } from "./phrase.js";
+import { phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
 import { resolveQuestion } from "./resolve.js";
 
 export type HandleResult = {
@@ -115,7 +115,8 @@ export async function handleVisitorMessage(input: {
     });
     reply = phrased.reply;
     wordingPayload = phrased.payload;
-  } catch {
+  } catch (error) {
+    const upstream = wordingFailure(error);
     return finish({
       reply: "Jawaban harga tidak dapat disusun.",
       draft,
@@ -125,6 +126,8 @@ export async function handleVisitorMessage(input: {
       priceReadMs,
       wordingMs: Date.now() - wordingStarted,
       errorClass: "wording_unavailable",
+      upstreamClass: upstream.upstreamClass,
+      upstreamMessage: upstream.upstreamMessage,
       wordingPayload: null,
       now,
       requestId,
@@ -168,6 +171,17 @@ export async function handleVisitorMessage(input: {
   });
 }
 
+function wordingFailure(error: unknown): { upstreamClass: string; upstreamMessage: string } {
+  if (error instanceof WordingUnavailable) {
+    return { upstreamClass: error.upstreamClass, upstreamMessage: error.upstreamMessage };
+  }
+  const message = error instanceof Error ? error.message : "wording unavailable";
+  return {
+    upstreamClass: "network",
+    upstreamMessage: message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\s+/g, " ").trim().slice(0, 300),
+  };
+}
+
 function readErrorReply(error: "unpublished_date" | "unknown_commodity" | "read_failed"): string {
   switch (error) {
     case "read_failed":
@@ -192,6 +206,8 @@ function finish(input: {
   priceReadMs: number;
   wordingMs: number;
   errorClass: string | null;
+  upstreamClass?: string;
+  upstreamMessage?: string;
   wordingPayload: WordingPayload | null;
   now: Date;
   requestId: string;
@@ -210,6 +226,9 @@ function finish(input: {
       priceReadMs: input.priceReadMs,
       wordingMs: input.wordingMs,
       errorClass: input.errorClass,
+      ...(input.upstreamClass
+        ? { upstreamClass: input.upstreamClass, upstreamMessage: input.upstreamMessage ?? "" }
+        : {}),
     },
   };
 }

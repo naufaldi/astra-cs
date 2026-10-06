@@ -81,6 +81,8 @@ export type RequestLog = {
   priceReadMs: number;
   wordingMs: number;
   errorClass: string | null;
+  upstreamClass?: string;
+  upstreamMessage?: string;
 };
 
 /** Round the mean of priced provinces to the nearest 50, matching the map. */
