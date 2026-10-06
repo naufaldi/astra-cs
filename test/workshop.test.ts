@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { emptyDraft, type HandoffRecord, type SessionDraft } from "../src/domain.js";
 import type { HandoffDb } from "../src/agent/handoff.js";
+import { openWorkshopDb, seedTenant } from "./sqlite-db.js";
 import { handleVisitorMessage } from "../src/agent/handle-request.js";
 import { handleFetch, type AppBindings } from "../src/routes.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
@@ -55,6 +56,7 @@ describe("token usage", () => {
       promptTokens: 180,
       completionTokens: 60,
       totalTokens: 240,
+      reasoningTokens: 0,
       estCostUsd: 0.00006006,
       estCostIdr: 1,
     });
@@ -62,9 +64,21 @@ describe("token usage", () => {
       promptTokens: 180,
       completionTokens: 60,
       totalTokens: 240,
+      reasoningTokens: 0,
       estCostUsd: 0.00012012,
       estCostIdr: 2,
     });
+    const withReasoning = {
+      usage: {
+        prompt_tokens: 180,
+        completion_tokens: 850,
+        total_tokens: 1030,
+        completion_tokens_details: { reasoning_tokens: 822 },
+      },
+    };
+    const priced = readTokenUsage(withReasoning, offPeak);
+    expect(priced.reasoningTokens).toBe(822);
+    expect(priced.totalTokens).toBe(1030);
     expect(readTokenUsage({ usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 99 } }, offPeak).totalTokens).toBe(99);
     expect(readTokenUsage({})).toEqual(zeroUsage());
     expect(priceTokens(1_000_000, 0, 1_000_000, offPeak).estCostUsd).toBe(0.143);
@@ -94,7 +108,7 @@ describe("token usage", () => {
       writeHandoff: async () => undefined,
       apiKey: "test-key",
       fetchImpl,
-      creditsRemaining: 3,
+      creditsRemaining: 5_000,
       now: offPeak,
       requestId: "req-usage",
     });
@@ -119,6 +133,7 @@ describe("tenant credits", () => {
 
   it("refuses a price question in the visitor's language and does not call the model", async () => {
     const indonesian = await ask("harga beras di Jakarta", { apiKey: "test-key", creditsRemaining: 0 });
+    expect(indonesian.result.outcome).toBe("402");
     expect(indonesian.result.log.errorClass).toBe("out_of_credits");
     expect(indonesian.result.log.wordingMs).toBe(0);
     expect(indonesian.result.reply).toBe(outOfCreditsReply("id"));
@@ -164,54 +179,6 @@ describe("cost projection", () => {
   });
 });
 
-function memoryDb(seed: Record<string, number>) {
-  const credits = new Map(Object.entries(seed));
-  const usage: unknown[][] = [];
-  const db = {
-    prepare(query: string) {
-      return {
-        bind(...values: unknown[]) {
-          return {
-            async run() {
-              if (query.includes("INSERT OR IGNORE INTO tenant_credit")) {
-                const id = String(values[0]);
-                if (!credits.has(id)) {
-                  credits.set(id, Number(values[1]));
-                }
-              } else if (query.includes("UPDATE tenant_credit")) {
-                const id = String(values[0]);
-                const current = credits.get(id) ?? 0;
-                if (current >= 1) {
-                  credits.set(id, current - 1);
-                }
-              } else if (query.includes("INSERT INTO request_usage")) {
-                usage.push(values);
-              }
-            },
-            async all<T>(): Promise<{ results: T[] }> {
-              if (query.includes("SELECT balance FROM")) {
-                const id = String(values[0]);
-                if (!credits.has(id)) {
-                  return { results: [] };
-                }
-                return { results: [{ balance: credits.get(id) }] as T[] };
-              }
-              if (query.includes("SELECT tenant_id")) {
-                const results = [...credits.entries()]
-                  .sort(([left], [right]) => left.localeCompare(right))
-                  .map(([tenant_id, balance]) => ({ tenant_id, balance }));
-                return { results: results as T[] };
-              }
-              return { results: [] };
-            },
-          };
-        },
-      };
-    },
-  };
-  return { db: db as unknown as HandoffDb, credits, usage };
-}
-
 function app(db: HandoffDb, extra: Partial<AppBindings> = {}): AppBindings {
   return {
     PRICE_SOURCE: "mock",
@@ -249,16 +216,16 @@ describe("chat route", () => {
     expect(response.status).toBe(400);
   });
 
-  it("logs a free refusal and serves the credit list only with the workshop key", async () => {
-    const { db, usage, credits } = memoryDb({ demo: 50 });
+  it("logs a free refusal and serves tokens plus credits only with the workshop key", async () => {
+    const { db, sqlite } = openWorkshopDb();
     const env = app(db);
     const response = await postChat(env, "How do I cook rice?");
     expect(response.status).toBe(200);
-    const body = await response.json() as { usage: { totalTokens: number }; credits: { cost: number; remaining: number } };
+    const body = await response.json() as { usage: { totalTokens: number }; credits: { tenantId: string; tokens: number; credits: number; chargedTokens: number } };
     expect(body.usage.totalTokens).toBe(0);
-    expect(body.credits).toEqual({ tenantId: "demo", remaining: 50, cost: 0 });
-    expect(credits.get("demo")).toBe(50);
-    expect(JSON.stringify(usage)).not.toContain("cook");
+    expect(body.credits).toEqual({ tenantId: "demo", tokens: 50_000, credits: 50, chargedTokens: 0, chargedCredits: 0 });
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 50_000 });
+    expect(JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all())).not.toContain("cook");
 
     const hidden = await handleFetch(new Request("http://local/credits"), env, async () => new Response());
     expect(hidden.status).toBe(401);
@@ -268,12 +235,14 @@ describe("chat route", () => {
       async () => new Response(),
     );
     expect(shown.status).toBe(200);
-    const listed = await shown.json() as { credits: { tenantId: string; balance: number }[] };
-    expect(listed.credits).toEqual([{ tenantId: "demo", balance: 50 }]);
+    const listed = await shown.json() as { credits: { tenantId: string; tokens: number; credits: number }[] };
+    expect(listed.credits).toEqual([{ tenantId: "demo", tokens: 50_000, credits: 50 }]);
   });
 
-  it("spends one credit on a model answer and then refuses without calling the model", async () => {
-    const { db, usage } = memoryDb({ low: 1 });
+  it("deducts the actual tokens, then returns 402 under two credits without a model call", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    seedTenant(sqlite, "low", 5_000);
+    seedTenant(sqlite, "thin", 1_000);
     const env = app(db, { ASTRAFLOW_API_KEY: "test-key" });
     const fetchImpl = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -287,26 +256,35 @@ describe("chat route", () => {
       expect(first.status).toBe(200);
       const answered = await first.json() as {
         usage: { promptTokens: number; completionTokens: number; totalTokens: number; estCostUsd: number };
-        credits: { tenantId: string; remaining: number; cost: number };
+        credits: { tenantId: string; tokens: number; credits: number; chargedTokens: number; chargedCredits: number };
       };
       expect(answered.usage).toMatchObject({ promptTokens: 180, completionTokens: 60, totalTokens: 240 });
       expect(answered.usage.estCostUsd).toBeGreaterThan(0);
-      expect(answered.credits).toEqual({ tenantId: "low", remaining: 0, cost: 1 });
+      expect(answered.credits).toEqual({
+        tenantId: "low",
+        tokens: 4_760,
+        credits: 4.76,
+        chargedTokens: 240,
+        chargedCredits: 0.24,
+      });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       const refused = await postChat(env, "How do I cook rice?", { "x-tenant-id": "low" });
       expect(refused.status).toBe(200);
-      const free = await refused.json() as { credits: { cost: number; remaining: number } };
-      expect(free.credits).toEqual({ tenantId: "low", remaining: 0, cost: 0 });
+      const free = await refused.json() as { credits: { tokens: number; chargedTokens: number } };
+      expect(free.credits).toMatchObject({ tenantId: "low", tokens: 4_760, chargedTokens: 0 });
 
-      const blocked = await postChat(env, "What's the price of rice in Jakarta?", { "x-tenant-id": "low" });
+      const blocked = await postChat(env, "What's the price of rice in Jakarta?", { "x-tenant-id": "thin" });
       expect(blocked.status).toBe(402);
-      const body = await blocked.json() as { reply: string; credits: { cost: number; remaining: number } };
+      const body = await blocked.json() as { outcome: string; reply: string; credits: { tokens: number; chargedTokens: number } };
+      expect(body.outcome).toBe("402");
       expect(body.reply).toBe(outOfCreditsReply("en"));
-      expect(body.credits).toEqual({ tenantId: "low", remaining: 0, cost: 0 });
+      expect(body.credits).toMatchObject({ tenantId: "thin", tokens: 1_000, chargedTokens: 0 });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(usage)).not.toContain("Jakarta");
-      expect(JSON.stringify(usage)).toContain("180");
+      const stored = JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all());
+      expect(stored).not.toContain("Jakarta");
+      expect(stored).toContain("180");
+      expect(stored).toContain("402");
     } finally {
       fetchImpl.mockRestore();
     }

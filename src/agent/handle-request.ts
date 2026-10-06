@@ -17,7 +17,8 @@ import {
 import { factsFromPhrase, provincesFromPhrase, selectRows } from "./select.js";
 import { phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
 import { resolveQuestion, type ResolvedClaim } from "./resolve.js";
-import { creditCost, outOfCreditsReply } from "../workshop/credits.js";
+import { passesCreditGate } from "../workshop/charge-credits.js";
+import { outOfCreditsReply } from "../workshop/credits.js";
 import { zeroUsage, type TokenUsage } from "../workshop/token-usage.js";
 
 export type HandleResult = {
@@ -41,7 +42,7 @@ export async function handleVisitorMessage(input: {
   fetchImpl?: typeof fetch;
   now?: Date;
   requestId?: string;
-  /** When set, a model call needs at least one credit. Omit it and the gate stays off. */
+  /** When set, a model call needs at least 2 credits (2,000 tokens). Omit it and the gate stays off. */
   creditsRemaining?: number;
 }): Promise<HandleResult> {
   const now = input.now ?? new Date();
@@ -124,12 +125,12 @@ export async function handleVisitorMessage(input: {
       requestId,
     });
   }
-  // Workshop: credits. Remove with src/workshop/credits.ts. Template answers stay free.
-  if (input.apiKey && input.creditsRemaining !== undefined && input.creditsRemaining < creditCost) {
+  // Workshop exercise: the 2-credit gate lives in charge-credits.ts. Template answers stay free.
+  if (input.apiKey && input.creditsRemaining !== undefined && !passesCreditGate(input.creditsRemaining)) {
     return finish({
       reply: outOfCreditsReply(language),
       draft,
-      outcome: "refusal",
+      outcome: "402",
       commodity: read.table.komoditas,
       tradingDate: read.table.tanggalPerdagangan,
       priceReadMs,

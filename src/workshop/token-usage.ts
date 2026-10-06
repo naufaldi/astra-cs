@@ -15,7 +15,10 @@
 export type TokenUsage = {
   promptTokens: number;
   completionTokens: number;
+  /** Prompt plus completion. Reasoning is already inside completion. */
   totalTokens: number;
+  /** Subset of completion tokens, from completion_tokens_details.reasoning_tokens. */
+  reasoningTokens: number;
   estCostUsd: number;
   estCostIdr: number;
 };
@@ -35,7 +38,14 @@ export const modelPrice = {
 
 /** A refusal, a claim, or any path that never called the model. */
 export function zeroUsage(): TokenUsage {
-  return { promptTokens: 0, completionTokens: 0, totalTokens: 0, estCostUsd: 0, estCostIdr: 0 };
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    reasoningTokens: 0,
+    estCostUsd: 0,
+    estCostIdr: 0,
+  };
 }
 
 /** True during the catalog's peak UTC windows. The end hour is excluded. */
@@ -45,37 +55,72 @@ export function isPeakUtc(now: Date): boolean {
   return inside(1, 4) || inside(6, 10);
 }
 
+/**
+ * WORKSHOP EXERCISE — estimateCost.
+ * Price one reply from token counts. Peak is twice the off-peak catalog rate.
+ * The credit price does not change here.
+ */
+export function estimateCost(
+  usage: { promptTokens: number; completionTokens: number },
+  isPeak: boolean,
+): { estCostUsd: number; estCostIdr: number } {
+  const multiplier = isPeak ? 2 : 1;
+  const rate = modelPrice.offPeak;
+  const usd =
+    ((usage.promptTokens / 1_000_000) * rate.inputPerMillionUsd +
+      (usage.completionTokens / 1_000_000) * rate.outputPerMillionUsd) *
+    multiplier;
+  const estCostUsd = Math.round(usd * 1e8) / 1e8;
+  return { estCostUsd, estCostIdr: Math.round(estCostUsd * modelPrice.idrPerUsd) };
+}
+
 /** Read `usage` from an Astra Flow chat completion and price it. */
 export function readTokenUsage(body: unknown, now: Date = new Date()): TokenUsage {
   const counted = extractUsage(body);
-  return priceTokens(counted.promptTokens, counted.completionTokens, counted.totalTokens, now);
+  return priceTokens(counted.promptTokens, counted.completionTokens, counted.totalTokens, now, counted.reasoningTokens);
 }
 
 /** Price a prompt/completion pair. `totalTokens` falls back to the sum when the API omits it. */
-export function priceTokens(promptTokens: number, completionTokens: number, totalTokens: number, now: Date): TokenUsage {
-  const rate = isPeakUtc(now) ? modelPrice.peak : modelPrice.offPeak;
-  const usd =
-    (promptTokens / 1_000_000) * rate.inputPerMillionUsd + (completionTokens / 1_000_000) * rate.outputPerMillionUsd;
-  const estCostUsd = Math.round(usd * 1e8) / 1e8;
-  const estCostIdr = Math.round(estCostUsd * modelPrice.idrPerUsd);
+export function priceTokens(
+  promptTokens: number,
+  completionTokens: number,
+  totalTokens: number,
+  now: Date,
+  reasoningTokens = 0,
+): TokenUsage {
+  const cost = estimateCost({ promptTokens, completionTokens }, isPeakUtc(now));
   const reported = totalTokens > 0 ? totalTokens : promptTokens + completionTokens;
-  return { promptTokens, completionTokens, totalTokens: reported, estCostUsd, estCostIdr };
+  return { promptTokens, completionTokens, totalTokens: reported, reasoningTokens, ...cost };
 }
 
-function extractUsage(body: unknown): { promptTokens: number; completionTokens: number; totalTokens: number } {
+function extractUsage(body: unknown): {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  reasoningTokens: number;
+} {
   if (typeof body !== "object" || body === null || !("usage" in body)) {
-    return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0 };
   }
   const usage = (body as { usage: unknown }).usage;
   if (typeof usage !== "object" || usage === null) {
-    return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0 };
   }
   const record = usage as Record<string, unknown>;
   return {
     promptTokens: numberField(record, "prompt_tokens"),
     completionTokens: numberField(record, "completion_tokens"),
     totalTokens: numberField(record, "total_tokens"),
+    reasoningTokens: reasoningTokensFrom(record),
   };
+}
+
+function reasoningTokensFrom(record: Record<string, unknown>): number {
+  const details = record.completion_tokens_details;
+  if (typeof details === "object" && details !== null && "reasoning_tokens" in details) {
+    return numberField(details as Record<string, unknown>, "reasoning_tokens");
+  }
+  return numberField(record, "reasoning_tokens");
 }
 
 function numberField(record: Record<string, unknown>, key: string): number {

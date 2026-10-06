@@ -4,8 +4,13 @@ import { handleVisitorMessage } from "./agent/handle-request.js";
 import { insertHandoff, listHandoffs, type HandoffDb } from "./agent/handoff.js";
 import { formatRequestLog } from "./agent/log.js";
 import { workshopKeyMatches } from "./agent/workshop-key.js";
+import { adminAuthorized, unauthorized } from "./admin/auth.js";
+import { renderAdmin, type AdminNotice } from "./admin/page.js";
+import { loadDashboard } from "./admin/queries.js";
 import { readTableThroughMcp } from "./mcp/client.js";
-import { creditCost, listCredits, readBalance, spendOneCredit, tenantIdFrom } from "./workshop/credits.js";
+import { chargeCredits, createTenant, topUpFake } from "./workshop/charge-credits.js";
+import { creditChargeView, isTenantSlug, listCredits, parseCreditCount, readBalance, tenantIdFrom } from "./workshop/credits.js";
+import { isPeakUtc } from "./workshop/token-usage.js";
 import { insertRequestUsage } from "./workshop/usage-log.js";
 
 export type AppBindings = {
@@ -31,6 +36,15 @@ export async function handleFetch(request: Request, env: AppBindings, mcp: (requ
   }
   if (url.pathname === "/credits" && request.method === "GET") {
     return handleCredits(request, env);
+  }
+  if (url.pathname === "/admin" && request.method === "GET") {
+    return handleAdmin(request, env, url);
+  }
+  if (url.pathname === "/admin/topup" && request.method === "POST") {
+    return handleTopup(request, env);
+  }
+  if (url.pathname === "/admin/tenant" && request.method === "POST") {
+    return handleNewTenant(request, env);
   }
   if (request.method === "GET" || request.method === "HEAD") {
     return env.ASSETS.fetch(request);
@@ -58,17 +72,24 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
     fetchImpl: guardedFetch(env.ASTRAFLOW_API_KEY),
     creditsRemaining: balance,
   });
-  const cost = result.modelCalled ? creditCost : 0;
-  const remaining = result.modelCalled ? await spendOneCredit(env.DB, tenantId) : balance;
-  await insertRequestUsage(env.DB, result.log, result.usage, tenantId);
+  const charge = result.modelCalled
+    ? await chargeCredits(env.DB, tenantId, result.usage, result.log.requestId, result.log.time)
+    : { chargedTokens: 0, overdraftTokens: 0, balanceTokens: balance };
+  await insertRequestUsage(env.DB, result.log, {
+    usage: result.usage,
+    tenantId,
+    chargedTokens: charge.chargedTokens,
+    overdraftTokens: charge.overdraftTokens,
+    peak: isPeakUtc(new Date(result.log.time)),
+  });
   console.log(formatRequestLog(result.log));
-  const status = result.log.errorClass === "out_of_credits" ? 402 : 200;
+  const status = result.outcome === "402" ? 402 : 200;
   return Response.json({
     reply: result.reply,
     draft: result.draft,
     outcome: result.outcome,
     usage: result.usage,
-    credits: { tenantId, remaining, cost },
+    credits: creditChargeView(tenantId, charge.balanceTokens, charge.chargedTokens),
   }, { status });
 }
 
@@ -117,6 +138,86 @@ function sanitizeDraft(body: unknown): SessionDraft {
     facts,
     claimedPrice: typeof draft.claimedPrice === "number" ? draft.claimedPrice : null,
   };
+}
+
+async function handleAdmin(request: Request, env: AppBindings, url: URL): Promise<Response> {
+  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+    return unauthorized();
+  }
+  const dashboard = await loadDashboard(env.DB, new Date());
+  return new Response(renderAdmin(dashboard, noticeFrom(url)), {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+async function handleTopup(request: Request, env: AppBindings): Promise<Response> {
+  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+    return unauthorized();
+  }
+  const form = await readAdminForm(request);
+  const credits = parseCreditCount(form.credits, false);
+  if (!isTenantSlug(form.tenant) || credits === null) {
+    return redirectAdmin("invalid", "", 0);
+  }
+  await topUpFake(env.DB, form.tenant, credits, new Date().toISOString());
+  return redirectAdmin("topped", form.tenant, credits);
+}
+
+async function handleNewTenant(request: Request, env: AppBindings): Promise<Response> {
+  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+    return unauthorized();
+  }
+  const form = await readAdminForm(request);
+  const credits = parseCreditCount(form.credits, true);
+  if (!isTenantSlug(form.tenant) || credits === null) {
+    return redirectAdmin("invalid", "", 0);
+  }
+  const created = await createTenant(env.DB, form.tenant, credits, new Date().toISOString());
+  if (created === "exists") {
+    return redirectAdmin("exists", form.tenant, credits);
+  }
+  return redirectAdmin("created", form.tenant, credits);
+}
+
+async function readAdminForm(request: Request): Promise<{ tenant: string; credits: string }> {
+  const form = await request.formData();
+  return {
+    tenant: String(form.get("tenant") ?? "").trim().toLowerCase(),
+    credits: String(form.get("credits") ?? ""),
+  };
+}
+
+function redirectAdmin(notice: string, tenant: string, credits: number): Response {
+  const query = new URLSearchParams({ notice });
+  if (tenant) {
+    query.set("tenant", tenant);
+    query.set("credits", String(credits));
+  }
+  return new Response(null, {
+    status: 303,
+    headers: { location: `/admin?${query}`, "cache-control": "no-store" },
+  });
+}
+
+function noticeFrom(url: URL): AdminNotice {
+  const kind = url.searchParams.get("notice");
+  if (kind === "invalid") {
+    return { kind: "invalid" };
+  }
+  const tenantId = url.searchParams.get("tenant") ?? "";
+  const credits = Number(url.searchParams.get("credits"));
+  if (!isTenantSlug(tenantId) || !Number.isInteger(credits)) {
+    return null;
+  }
+  switch (kind) {
+    case "topped":
+    case "created":
+      return { kind, tenantId, credits };
+    case "exists":
+      return { kind, tenantId };
+    default:
+      return null;
+  }
 }
 
 function guardedFetch(apiKey: string | undefined): typeof fetch {

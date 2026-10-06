@@ -63,7 +63,7 @@ export type PublicPriceFact = {
   satuan: "kg" | "liter";
 };
 
-export type Outcome = "answered" | "refusal" | "handoff" | "unread";
+export type Outcome = "answered" | "refusal" | "handoff" | "unread" | "402";
 
 export type HandoffRecord = {
   commodity: string;

@@ -47,16 +47,17 @@ function factsBubble(draft) {
   return lines.join("\n");
 }
 
-function usageLine(usage, credits) {
+function usageLine(usage, credits, outcome) {
   if (!usage) {
     return "";
   }
   const tokens = Number(usage.totalTokens) || 0;
   const usd = Number(usage.estCostUsd) || 0;
   const idr = Number(usage.estCostIdr) || 0;
-  const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("id-ID")}`;
-  const left = credits && typeof credits.remaining === "number" ? ` · ${credits.remaining} credits left` : "";
-  return `${tokens} tokens · ${cost}${left}`;
+  const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("en-US")}`;
+  const charged = credits && typeof credits.chargedCredits === "number" ? `${credits.chargedCredits.toFixed(2)} credits charged` : "";
+  const left = credits && typeof credits.credits === "number" ? `${credits.credits.toFixed(2)} credits left` : "";
+  return [outcome, `${tokens} tokens`, cost, charged, left].filter(Boolean).join(" · ");
 }
 
 function addBubble(role, text, meta) {
@@ -100,7 +101,7 @@ form.addEventListener("submit", async (event) => {
     });
     const body = await response.json();
     saveDraft(body.draft ?? {});
-    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits));
+    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits, body.outcome));
   } catch {
     addBubble("agent", "Tabel harga tidak dapat dibaca.");
   } finally {
