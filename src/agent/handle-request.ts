@@ -17,6 +17,8 @@ import {
 import { factsFromPhrase, provincesFromPhrase, selectRows } from "./select.js";
 import { phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
 import { resolveQuestion, type ResolvedClaim } from "./resolve.js";
+import { creditCost, outOfCreditsReply } from "../workshop/credits.js";
+import { zeroUsage, type TokenUsage } from "../workshop/token-usage.js";
 
 export type HandleResult = {
   reply: string;
@@ -24,6 +26,8 @@ export type HandleResult = {
   outcome: Outcome;
   log: RequestLog;
   wordingPayload: WordingPayload | null;
+  usage: TokenUsage;
+  modelCalled: boolean;
 };
 
 /** Answer one visitor message. The server does not keep the draft. */
@@ -37,6 +41,8 @@ export async function handleVisitorMessage(input: {
   fetchImpl?: typeof fetch;
   now?: Date;
   requestId?: string;
+  /** When set, a model call needs at least one credit. Omit it and the gate stays off. */
+  creditsRemaining?: number;
 }): Promise<HandleResult> {
   const now = input.now ?? new Date();
   const requestId = input.requestId ?? crypto.randomUUID();
@@ -118,15 +124,38 @@ export async function handleVisitorMessage(input: {
       requestId,
     });
   }
+  // Workshop: credits. Remove with src/workshop/credits.ts. Template answers stay free.
+  if (input.apiKey && input.creditsRemaining !== undefined && input.creditsRemaining < creditCost) {
+    return finish({
+      reply: outOfCreditsReply(language),
+      draft,
+      outcome: "refusal",
+      commodity: read.table.komoditas,
+      tradingDate: read.table.tanggalPerdagangan,
+      priceReadMs,
+      wordingMs: 0,
+      errorClass: "out_of_credits",
+      wordingPayload: null,
+      usage: zeroUsage(),
+      modelCalled: false,
+      now,
+      requestId,
+    });
+  }
   const wordingStarted = Date.now();
   let reply: string;
   let wordingPayload: WordingPayload | null = null;
+  let usage = zeroUsage();
+  let modelCalled = false;
   try {
     const phrased = await phraseResolved(selected, input.text, {
       apiKey: input.apiKey,
       model: input.model,
       fetchImpl: input.fetchImpl,
+      now,
     });
+    usage = phrased.usage;
+    modelCalled = phrased.calledAstra;
     reply = `${phrased.reply} ${sourceCitation(language, read.table.tanggalPerdagangan)}`;
     wordingPayload = phrased.payload;
   } catch (error) {
@@ -180,6 +209,8 @@ export async function handleVisitorMessage(input: {
     wordingMs,
     errorClass: null,
     wordingPayload,
+    usage,
+    modelCalled,
     now,
     requestId,
   });
@@ -277,6 +308,8 @@ function finish(input: {
   upstreamClass?: string;
   upstreamMessage?: string;
   wordingPayload: WordingPayload | null;
+  usage?: TokenUsage;
+  modelCalled?: boolean;
   now: Date;
   requestId: string;
 }): HandleResult {
@@ -285,6 +318,8 @@ function finish(input: {
     draft: input.draft,
     outcome: input.outcome,
     wordingPayload: input.wordingPayload,
+    usage: input.usage ?? zeroUsage(),
+    modelCalled: input.modelCalled ?? false,
     log: {
       time: input.now.toISOString(),
       requestId: input.requestId,

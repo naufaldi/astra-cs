@@ -13,7 +13,7 @@
   "assets": {
     "directory": "./web",
     "binding": "ASSETS",
-    "run_worker_first": ["/chat", "/mcp", "/handoff"]
+    "run_worker_first": ["/chat", "/mcp", "/handoff", "/credits"]
   },
   "vars": {
     "PRICE_SOURCE": "live"
