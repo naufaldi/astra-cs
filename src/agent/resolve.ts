@@ -1,5 +1,13 @@
 import type { SessionDraft } from "../domain.js";
-import { commodityIdByName, matchCommodity, matchProvinces, normalizeVisitorText } from "../mcp/published-names.js";
+import {
+  commodityById,
+  commodityIdByName,
+  matchCommodity,
+  matchProvinces,
+  normalizeVisitorText,
+  type NameHit,
+} from "../mcp/published-names.js";
+import { replyLanguage, replies } from "./language.js";
 
 export type Selection =
   | { kind: "province"; province: string }
@@ -18,8 +26,9 @@ export type ResolvedRead = {
 export type ResolvedClaim = {
   type: "claim";
   commodity: string;
-  province: string;
-  displayedPrice: number;
+  commodityId: string | null;
+  province: string | null;
+  displayedPrice: number | null;
   claimedPrice: number;
 };
 
@@ -49,59 +58,51 @@ const months: Record<string, string> = {
   desember: "12",
 };
 
-/** Turn visitor text into one resolved question, a claim, or a stop. The raw text is not returned. */
+/**
+ * Turn visitor text into one resolved question, a claim, or a stop.
+ * Cooking and recipe intent wins even when a commodity is named.
+ * The raw text is not returned.
+ */
 export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
   const normalized = normalizeVisitorText(text);
-  if (/\btren\b|\btrend\b|kecenderungan|seminggu|sebulan|antar tanggal/.test(normalized)) {
-    return stop("trend", "Pertanyaan tren tidak dijawab dari satu tabel harga.");
+  const language = replyLanguage(text);
+  if (isOffTopic(normalized)) {
+    return stop("offtopic", replies[language].offtopic);
+  }
+  if (isTrend(normalized)) {
+    return stop("trend", replies[language].trend);
   }
   const commodity = matchCommodity(text);
-  if (commodity.status === "many") {
-    if (commodity.reason === "cross") {
-      return stop("cross_commodity", "Perbandingan lintas komoditas tidak dijawab dari satu tabel harga.");
-    }
-    return stop("ambiguous_commodity", "Sebutkan satu nama komoditas yang terbit di Monitor Pangan.");
-  }
   const provinces = matchProvinces(text);
   const claimedPrice = findClaimedPrice(text);
+  const asksPrice = hasPriceIntent(normalized);
+  const fullQuestion = asksPrice && provinces.length > 0 && commodity.status === "one";
+  if (claimedPrice !== null && !fullQuestion) {
+    return casualClaim(text, commodity, provinces, draft, claimedPrice);
+  }
+  if (commodity.status === "many") {
+    if (commodity.reason === "cross") {
+      return stop("cross_commodity", replies[language].cross);
+    }
+    return stop("ambiguous_commodity", replies[language].ambiguous);
+  }
   const dateToken = findDateToken(normalized);
   const draftCommodityId = draft.commodity ? commodityIdByName(draft.commodity) : undefined;
   const commodityId = commodity.status === "one" ? commodity.id : draftCommodityId;
 
-  if (
-    claimedPrice !== null &&
-    commodity.status === "none" &&
-    provinces.length === 0 &&
-    draft.commodity &&
-    draft.provinces.length === 1 &&
-    draft.facts.length > 0
-  ) {
-    const province = draft.provinces[0] ?? "";
-    const displayed = draft.facts.find((fact) => fact.provinsi === province)?.harga;
-    if (displayed !== undefined) {
-      return {
-        type: "claim",
-        commodity: draft.commodity,
-        province,
-        displayedPrice: displayed,
-        claimedPrice,
-      };
-    }
-  }
-
   if (!commodityId) {
-    if (hasPriceIntent(normalized) || claimedPrice !== null) {
-      return stop("ambiguous_commodity", "Sebutkan satu nama komoditas yang terbit di Monitor Pangan.");
+    if (asksPrice) {
+      return stop("ambiguous_commodity", replies[language].ambiguous);
     }
-    return stop("offtopic", "Saya hanya menjawab pertanyaan harga dari satu tabel Monitor Pangan.");
+    return stop("offtopic", replies[language].offtopic);
   }
 
   if (provinces.length > 2) {
-    return stop("need_province", "Sebutkan satu atau dua provinsi.");
+    return stop("need_province", replies[language].oneOrTwo);
   }
-  const versus = /rata-rata|rata rata/.test(normalized);
-  const rankHigh = /termahal|tertinggi|paling mahal/.test(normalized);
-  const rankLow = /termurah|terendah|paling murah/.test(normalized);
+  const versus = /rata-rata|rata rata|\baverage\b/.test(normalized);
+  const rankHigh = /termahal|tertinggi|paling mahal|\bhighest\b|most expensive/.test(normalized);
+  const rankLow = /termurah|terendah|paling murah|\blowest\b|\bcheapest\b/.test(normalized);
   let selection: Selection;
   if (provinces.length === 2) {
     selection = { kind: "compare", left: provinces[0] ?? "", right: provinces[1] ?? "" };
@@ -114,9 +115,64 @@ export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
   } else if (rankLow) {
     selection = { kind: "rank", direction: "low" };
   } else {
-    return stop("need_province", "Sebutkan provinsinya, atau minta yang tertinggi atau terendah.");
+    return stop("need_province", replies[language].needProvince);
   }
   return { type: "read", commodityId, dateToken, selection, claimedPrice };
+}
+
+/** A stated price that is not also "what does the table say in this province". */
+function casualClaim(
+  text: string,
+  commodity: NameHit,
+  provinces: string[],
+  draft: SessionDraft,
+  claimedPrice: number,
+): ResolvedClaim {
+  let commodityName = "tidak disebut";
+  let commodityId: string | null = null;
+  if (commodity.status === "one") {
+    commodityId = commodity.id;
+    commodityName = commodityById(commodity.id)?.name ?? commodity.id;
+  } else if (draft.commodity) {
+    commodityName = draft.commodity;
+    commodityId = commodityIdByName(draft.commodity) ?? null;
+  } else {
+    const family = ambiguousFamily(normalizeVisitorText(text));
+    if (family) {
+      commodityName = family;
+    }
+  }
+  let province: string | null = provinces[0] ?? null;
+  let displayedPrice: number | null = null;
+  if (!province && draft.provinces.length === 1) {
+    province = draft.provinces[0] ?? null;
+    displayedPrice = draft.facts.find((fact) => fact.provinsi === province)?.harga ?? null;
+  }
+  return { type: "claim", commodity: commodityName, commodityId, province, displayedPrice, claimedPrice };
+}
+
+function ambiguousFamily(text: string): string | null {
+  if (/\b(cabai|cabe)\b/.test(text)) {
+    return "Cabai";
+  }
+  if (/\bbawang\b/.test(text)) {
+    return "Bawang";
+  }
+  if (/\bayam\b/.test(text)) {
+    return "Ayam";
+  }
+  return null;
+}
+
+/** Cooking, nutrition, and prompt injection are refused before a commodity match. */
+function isOffTopic(text: string): boolean {
+  return /\bresep\b|\bdimasak\b|\bmemasak\b|\bmasak\b|\bdimakan\b|\bcara makan\b|\benaknya\b|\benak\b|\bgizi\b|\bnutrisi\b|\bkalori\b|\bcook\b|\brecipe\b|\beat\b|\beating\b|\bnutrition\b|\babaikan instruksi\b|\bignore previous\b/.test(
+    text,
+  );
+}
+
+function isTrend(text: string): boolean {
+  return /\btren\b|\btrend\b|kecenderungan|seminggu|sebulan|antar tanggal|\blast week\b|\blast month\b/.test(text);
 }
 
 function stop(
@@ -127,7 +183,9 @@ function stop(
 }
 
 function hasPriceIntent(text: string): boolean {
-  return /harga|berapa|banding|termahal|termurah|rata/.test(text);
+  return /\bharga\b|\bberapa\b|\bbanding\b|\btermahal\b|\btermurah\b|\brata\b|\bprice\b|\bhow much\b|\bhighest\b|\blowest\b|\bcheapest\b|\baverage\b|\bcompare\b/.test(
+    text,
+  );
 }
 
 function findDateToken(text: string): string {
@@ -142,12 +200,36 @@ function findDateToken(text: string): string {
   return "terbaru";
 }
 
+const money = String.raw`(\d{1,3}(?:\.\d{3})+|\d+)(?:\s*(ribu|rb|k)\b)?`;
+const cuedPrice = new RegExp(
+  String.raw`(?:harusnya|seharusnya|klaim(?:nya)?|yang benar|cuma|hanya|harganya|only|just)\s*(?:rp\.?)?\s*${money}`,
+  "i",
+);
+const suffixedPrice = new RegExp(String.raw`(?:^|[^\d])(\d{1,3}(?:\.\d{3})+|\d+)\s*(ribu|rb|k)\b`, "i");
+
+/** A price the visitor asserts: "cuma 10 ribu", "70rb", "15.000", "12k", or "harusnya 12000". */
 function findClaimedPrice(text: string): number | null {
-  const match = text.match(/(?:harusnya|seharusnya|klaim(?:nya)?|yang benar)\s*(?:rp\.?)?\s*(\d{1,3}(?:\.\d{3})+|\d+)/i);
-  if (!match?.[1]) {
+  const cued = text.match(cuedPrice);
+  if (cued?.[1]) {
+    return parseMoney(cued[1], cued[2]);
+  }
+  const suffixed = text.match(suffixedPrice);
+  if (suffixed?.[1] && suffixed[2]) {
+    return parseMoney(suffixed[1], suffixed[2]);
+  }
+  return null;
+}
+
+function parseMoney(raw: string, suffix: string | undefined): number | null {
+  const base = parseIndonesianNumber(raw);
+  if (base === null) {
     return null;
   }
-  return parseIndonesianNumber(match[1]);
+  const unit = suffix?.toLowerCase();
+  if (unit === "ribu" || unit === "rb" || unit === "k") {
+    return base * 1000;
+  }
+  return base;
 }
 
 function parseIndonesianNumber(raw: string): number | null {

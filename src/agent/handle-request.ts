@@ -6,9 +6,17 @@ import {
   type RequestLog,
   type SessionDraft,
 } from "../domain.js";
+import {
+  missingProvincePrice,
+  recordedClaim,
+  replies,
+  replyLanguage,
+  reviewClaim,
+  sourceCitation,
+} from "./language.js";
 import { factsFromPhrase, provincesFromPhrase, selectRows } from "./select.js";
 import { phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
-import { resolveQuestion } from "./resolve.js";
+import { resolveQuestion, type ResolvedClaim } from "./resolve.js";
 
 export type HandleResult = {
   reply: string;
@@ -33,6 +41,7 @@ export async function handleVisitorMessage(input: {
   const now = input.now ?? new Date();
   const requestId = input.requestId ?? crypto.randomUUID();
   const draft = input.draft ?? emptyDraft();
+  const language = replyLanguage(input.text);
   const resolved = resolveQuestion(input.text, draft);
   if (resolved.type === "stop") {
     return finish({
@@ -50,19 +59,24 @@ export async function handleVisitorMessage(input: {
     });
   }
   if (resolved.type === "claim") {
+    const filled = await fillClaim(resolved, input.readTable);
+    const province = filled.province ?? "tidak disebut";
     await input.writeHandoff({
-      commodity: resolved.commodity,
-      province: resolved.province,
-      displayedPrice: resolved.displayedPrice,
+      commodity: filled.commodity,
+      province,
+      displayedPrice: filled.displayedPrice ?? 0,
       claimedPrice: resolved.claimedPrice,
     });
+    const reply = filled.province
+      ? recordedClaim(language, filled.commodity, filled.province)
+      : reviewClaim(language, filled.commodity, resolved.claimedPrice);
     return finish({
-      reply: `Klaim harga ${resolved.commodity} di ${resolved.province} sudah dicatat.`,
+      reply,
       draft: { ...draft, claimedPrice: null },
       outcome: "handoff",
-      commodity: resolved.commodity,
-      tradingDate: draft.tradingDate,
-      priceReadMs: 0,
+      commodity: filled.commodity === "tidak disebut" ? null : filled.commodity,
+      tradingDate: filled.tradingDate ?? draft.tradingDate,
+      priceReadMs: filled.priceReadMs,
       wordingMs: 0,
       errorClass: null,
       wordingPayload: null,
@@ -75,7 +89,7 @@ export async function handleVisitorMessage(input: {
   const priceReadMs = Date.now() - readStarted;
   if (!read.ok) {
     return finish({
-      reply: readErrorReply(read.error),
+      reply: readErrorReply(read.error, language),
       draft,
       outcome: read.error === "read_failed" ? "unread" : "refusal",
       commodity: null,
@@ -91,7 +105,7 @@ export async function handleVisitorMessage(input: {
   const selected = selectRows(read.table, resolved.selection);
   if ("missing" in selected) {
     return finish({
-      reply: `${read.table.komoditas} tidak memiliki harga untuk provinsi itu pada tanggal perdagangan ${read.table.tanggalPerdagangan}.`,
+      reply: missingProvincePrice(language, read.table.komoditas, read.table.tanggalPerdagangan),
       draft,
       outcome: "refusal",
       commodity: read.table.komoditas,
@@ -113,12 +127,12 @@ export async function handleVisitorMessage(input: {
       model: input.model,
       fetchImpl: input.fetchImpl,
     });
-    reply = phrased.reply;
+    reply = `${phrased.reply} ${sourceCitation(language, read.table.tanggalPerdagangan)}`;
     wordingPayload = phrased.payload;
   } catch (error) {
     const upstream = wordingFailure(error);
     return finish({
-      reply: "Jawaban harga tidak dapat disusun.",
+      reply: replies[language].wording,
       draft,
       outcome: "refusal",
       commodity: read.table.komoditas,
@@ -153,7 +167,7 @@ export async function handleVisitorMessage(input: {
         claimedPrice: resolved.claimedPrice,
       });
       outcome = "handoff";
-      reply = `${reply} Klaim harga sudah dicatat.`;
+      reply = `${reply} ${recordedClaim(language, read.table.komoditas, displayed.provinsi)}`;
     }
   }
   return finish({
@@ -171,6 +185,57 @@ export async function handleVisitorMessage(input: {
   });
 }
 
+/** Fill a casual claim from the draft or one price read. This path does not call the model. */
+async function fillClaim(
+  claim: ResolvedClaim,
+  readTable: (commodityId: string, dateToken: string) => Promise<ReadResult>,
+): Promise<{
+  commodity: string;
+  province: string | null;
+  displayedPrice: number | null;
+  tradingDate: string | null;
+  priceReadMs: number;
+}> {
+  if (claim.displayedPrice !== null && claim.province) {
+    return {
+      commodity: claim.commodity,
+      province: claim.province,
+      displayedPrice: claim.displayedPrice,
+      tradingDate: null,
+      priceReadMs: 0,
+    };
+  }
+  if (!claim.commodityId) {
+    return {
+      commodity: claim.commodity,
+      province: claim.province,
+      displayedPrice: claim.displayedPrice,
+      tradingDate: null,
+      priceReadMs: 0,
+    };
+  }
+  const started = Date.now();
+  const read = await readTable(claim.commodityId, "terbaru");
+  const priceReadMs = Date.now() - started;
+  if (!read.ok) {
+    return {
+      commodity: claim.commodity,
+      province: claim.province,
+      displayedPrice: claim.displayedPrice,
+      tradingDate: null,
+      priceReadMs,
+    };
+  }
+  const row = claim.province ? read.table.baris.find((item) => item.provinsi === claim.province) : undefined;
+  return {
+    commodity: read.table.komoditas,
+    province: claim.province,
+    displayedPrice: row?.harga ?? (claim.province ? null : read.table.rataRata),
+    tradingDate: read.table.tanggalPerdagangan,
+    priceReadMs,
+  };
+}
+
 function wordingFailure(error: unknown): { upstreamClass: string; upstreamMessage: string } {
   if (error instanceof WordingUnavailable) {
     return { upstreamClass: error.upstreamClass, upstreamMessage: error.upstreamMessage };
@@ -182,14 +247,17 @@ function wordingFailure(error: unknown): { upstreamClass: string; upstreamMessag
   };
 }
 
-function readErrorReply(error: "unpublished_date" | "unknown_commodity" | "read_failed"): string {
+function readErrorReply(
+  error: "unpublished_date" | "unknown_commodity" | "read_failed",
+  language: ReturnType<typeof replyLanguage>,
+): string {
   switch (error) {
     case "read_failed":
-      return "Tabel harga tidak dapat dibaca.";
+      return replies[language].unread;
     case "unpublished_date":
-      return "Tanggal itu tidak memiliki tabel harga.";
+      return replies[language].unpublished;
     case "unknown_commodity":
-      return "Komoditas itu tidak ada pada tabel harga.";
+      return replies[language].unknown;
     default: {
       const unexpected: never = error;
       throw new Error(`unexpected read error ${JSON.stringify(unexpected)}`);
