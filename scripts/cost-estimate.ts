@@ -64,8 +64,8 @@ export function resolveSample(flags: { prompt?: number; completion?: number; sha
     const modelShare = flags.share ?? measured.modelShare;
     const shareNote = flags.share === undefined ? "share from those rows" : "share from --share";
     return {
-      promptTokens: measured.promptTokens,
-      completionTokens: measured.completionTokens,
+      promptTokens: Math.round(measured.promptTokens),
+      completionTokens: Math.round(measured.completionTokens),
       modelShare,
       note: `Token source: local D1, ${measured.modelCalls} answered model calls out of ${measured.chats} chats (${shareNote}).`,
     };
