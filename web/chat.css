@@ -60,6 +60,7 @@ body {
 
 .bubble p { margin: 0; white-space: pre-wrap; }
 .bubble time { display: block; margin-top: 6px; font-size: 0.75rem; color: var(--slate); }
+.bubble .meta { margin-top: 4px; font-size: 0.75rem; color: var(--slate); }
 
 .agent { align-self: flex-start; background: var(--paper); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .visitor { align-self: flex-end; background: var(--ink); color: var(--canvas); border-bottom-right-radius: 4px; }

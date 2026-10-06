@@ -47,7 +47,19 @@ function factsBubble(draft) {
   return lines.join("\n");
 }
 
-function addBubble(role, text) {
+function usageLine(usage, credits) {
+  if (!usage) {
+    return "";
+  }
+  const tokens = Number(usage.totalTokens) || 0;
+  const usd = Number(usage.estCostUsd) || 0;
+  const idr = Number(usage.estCostIdr) || 0;
+  const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("id-ID")}`;
+  const left = credits && typeof credits.remaining === "number" ? ` · ${credits.remaining} credits left` : "";
+  return `${tokens} tokens · ${cost}${left}`;
+}
+
+function addBubble(role, text, meta) {
   const item = document.createElement("li");
   item.className = `bubble ${role}`;
   const paragraph = document.createElement("p");
@@ -56,6 +68,12 @@ function addBubble(role, text) {
   time.dateTime = new Date().toISOString();
   time.textContent = new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date());
   item.append(paragraph, time);
+  if (meta) {
+    const note = document.createElement("p");
+    note.className = "meta";
+    note.textContent = meta;
+    item.append(note);
+  }
   transcript.append(item);
   item.scrollIntoView({ block: "end" });
 }
@@ -82,7 +100,7 @@ form.addEventListener("submit", async (event) => {
     });
     const body = await response.json();
     saveDraft(body.draft ?? {});
-    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.");
+    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits));
   } catch {
     addBubble("agent", "Tabel harga tidak dapat dibaca.");
   } finally {

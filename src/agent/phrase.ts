@@ -1,4 +1,5 @@
 import { formatRupiah } from "../domain.js";
+import { readTokenUsage, zeroUsage, type TokenUsage } from "../workshop/token-usage.js";
 import { replyLanguage, type ReplyLanguage } from "./language.js";
 import type { PhraseFacts } from "./select.js";
 
@@ -89,18 +90,18 @@ function phraseEnglish(facts: PhraseFacts): string {
   }
 }
 
-export type PhraseResult = { reply: string; payload: WordingPayload; calledAstra: boolean };
+export type PhraseResult = { reply: string; payload: WordingPayload; calledAstra: boolean; usage: TokenUsage };
 
 /** Phrase with AstraFlow only when an API key is present. Otherwise use the fact template. */
 export async function phraseResolved(
   facts: PhraseFacts,
   rawText: string,
-  options: { apiKey?: string; model?: string; fetchImpl?: typeof fetch },
+  options: { apiKey?: string; model?: string; fetchImpl?: typeof fetch; now?: Date },
 ): Promise<PhraseResult> {
   const language = replyLanguage(rawText);
   const payload = buildWordingPayload(facts, rawText);
   if (!options.apiKey) {
-    return { reply: phraseFromFacts(facts, language), payload, calledAstra: false };
+    return { reply: phraseFromFacts(facts, language), payload, calledAstra: false, usage: zeroUsage() };
   }
   const fetchImpl = options.fetchImpl ?? fetch;
   let response: Response;
@@ -129,7 +130,8 @@ export async function phraseResolved(
   if (!reply) {
     throw new WordingUnavailable("empty_completion", "AstraFlow returned no reply text");
   }
-  return { reply, payload, calledAstra: true };
+  // Workshop: usage. Remove with src/workshop/token-usage.ts.
+  return { reply, payload, calledAstra: true, usage: readTokenUsage(body, options.now ?? new Date()) };
 }
 
 function resolvedModel(model: string | undefined): string {

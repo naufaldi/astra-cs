@@ -5,6 +5,8 @@ import { insertHandoff, listHandoffs, type HandoffDb } from "./agent/handoff.js"
 import { formatRequestLog } from "./agent/log.js";
 import { workshopKeyMatches } from "./agent/workshop-key.js";
 import { readTableThroughMcp } from "./mcp/client.js";
+import { creditCost, listCredits, readBalance, spendOneCredit, tenantIdFrom } from "./workshop/credits.js";
+import { insertRequestUsage } from "./workshop/usage-log.js";
 
 export type AppBindings = {
   PRICE_SOURCE: string;
@@ -27,6 +29,9 @@ export async function handleFetch(request: Request, env: AppBindings, mcp: (requ
   if (url.pathname === "/handoff" && request.method === "GET") {
     return handleHandoff(request, env);
   }
+  if (url.pathname === "/credits" && request.method === "GET") {
+    return handleCredits(request, env);
+  }
   if (request.method === "GET" || request.method === "HEAD") {
     return env.ASSETS.fetch(request);
   }
@@ -40,6 +45,9 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
   if (text.trim() === "") {
     return Response.json({ reply: replies[replyLanguage(text)].empty, draft, outcome: "refusal" }, { status: 400 });
   }
+  // Workshop: usage and credits. Remove with src/workshop/.
+  const tenantId = tenantIdFrom(request);
+  const balance = await readBalance(env.DB, tenantId);
   const result = await handleVisitorMessage({
     text,
     draft,
@@ -48,9 +56,29 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
     apiKey: env.ASTRAFLOW_API_KEY,
     model: env.ASTRAFLOW_MODEL,
     fetchImpl: guardedFetch(env.ASTRAFLOW_API_KEY),
+    creditsRemaining: balance,
   });
+  const cost = result.modelCalled ? creditCost : 0;
+  const remaining = result.modelCalled ? await spendOneCredit(env.DB, tenantId) : balance;
+  await insertRequestUsage(env.DB, result.log, result.usage, tenantId);
   console.log(formatRequestLog(result.log));
-  return Response.json({ reply: result.reply, draft: result.draft, outcome: result.outcome });
+  const status = result.log.errorClass === "out_of_credits" ? 402 : 200;
+  return Response.json({
+    reply: result.reply,
+    draft: result.draft,
+    outcome: result.outcome,
+    usage: result.usage,
+    credits: { tenantId, remaining, cost },
+  }, { status });
+}
+
+async function handleCredits(request: Request, env: AppBindings): Promise<Response> {
+  const provided = request.headers.get("x-workshop-key") ?? "";
+  const allowed = await workshopKeyMatches(provided, env.WORKSHOP_KEY ?? "");
+  if (!allowed) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  return Response.json({ credits: await listCredits(env.DB) });
 }
 
 async function handleHandoff(request: Request, env: AppBindings): Promise<Response> {

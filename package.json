@@ -9,7 +9,8 @@
     "types": "wrangler types",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "cost:estimate": "node scripts/run-cost-estimate.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
