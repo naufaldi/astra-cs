@@ -47,19 +47,7 @@ function factsBubble(draft) {
   return lines.join("\n");
 }
 
-function usageLine(usage, credits) {
-  if (!usage) {
-    return "";
-  }
-  const tokens = Number(usage.totalTokens) || 0;
-  const usd = Number(usage.estCostUsd) || 0;
-  const idr = Number(usage.estCostIdr) || 0;
-  const cost = tokens === 0 ? "free" : `est. $${usd.toFixed(6)} · Rp${idr.toLocaleString("id-ID")}`;
-  const left = credits && typeof credits.remaining === "number" ? ` · ${credits.remaining} credits left` : "";
-  return `${tokens} tokens · ${cost}${left}`;
-}
-
-function addBubble(role, text, meta) {
+function addBubble(role, text) {
   const item = document.createElement("li");
   item.className = `bubble ${role}`;
   const paragraph = document.createElement("p");
@@ -68,46 +56,127 @@ function addBubble(role, text, meta) {
   time.dateTime = new Date().toISOString();
   time.textContent = new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date());
   item.append(paragraph, time);
-  if (meta) {
-    const note = document.createElement("p");
-    note.className = "meta";
-    note.textContent = meta;
-    item.append(note);
-  }
   transcript.append(item);
   item.scrollIntoView({ block: "end" });
+}
+
+const tenantParam = new URLSearchParams(location.search).get("tenant")?.trim().toLowerCase() ?? "";
+const brand = document.querySelector("#brand");
+const send = document.querySelector("#send");
+const slugPattern = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+let lastText = "";
+let known = true;
+
+function englishMessage(text) {
+  return /\b(what|price|rice|how|where|the)\b/i.test(text);
+}
+
+function addNotice(title, detail, buttonLabel) {
+  const item = document.createElement("li");
+  item.className = "bubble system";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const paragraph = document.createElement("p");
+  paragraph.textContent = detail;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = buttonLabel;
+  button.addEventListener("click", () => {
+    if (lastText) sendChat(lastText, false);
+  });
+  item.append(heading, paragraph, button);
+  transcript.append(item);
+  item.scrollIntoView({ block: "end" });
+}
+
+function showUnavailable(text) {
+  if (englishMessage(text)) {
+    addNotice("Sorry, chat is temporarily unavailable.", "Please try again in a moment.", "Try again");
+    return;
+  }
+  addNotice("Maaf, layanan chat sedang tidak tersedia.", "Silakan coba lagi beberapa saat lagi.", "Coba lagi");
+}
+
+function showOutage(text) {
+  if (englishMessage(text)) {
+    addNotice("Sorry, something went wrong.", "Try again.", "Try again");
+    return;
+  }
+  addNotice("Maaf, terjadi gangguan.", "Coba lagi.", "Coba lagi");
+}
+
+async function loadBrand() {
+  if (tenantParam && !slugPattern.test(tenantParam)) {
+    known = false;
+    addBubble("agent", "Layanan ini tidak ditemukan.");
+    return;
+  }
+  const query = tenantParam ? `?tenant=${encodeURIComponent(tenantParam)}` : "";
+  try {
+    const response = await fetch(`/brand${query}`);
+    if (!response.ok) {
+      known = false;
+      addBubble("agent", englishMessage(tenantParam) ? "This service was not found." : "Layanan ini tidak ditemukan.");
+      return;
+    }
+    const body = await response.json();
+    if (body.name) brand.textContent = `Dukungan Monitor Pangan · ${body.name}`;
+  } catch {
+    known = false;
+  }
+}
+
+async function sendChat(text, showVisitor) {
+  if (!known) {
+    if (showVisitor) addBubble("visitor", text);
+    addBubble("agent", englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan.");
+    return;
+  }
+  if (showVisitor) addBubble("visitor", text);
+  lastText = text;
+  send.disabled = true;
+  try {
+    const headers = { "content-type": "application/json" };
+    if (tenantParam) headers["x-tenant-id"] = tenantParam;
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text, draft: readDraft() }),
+    });
+    const body = await response.json();
+    saveDraft(body.draft ?? {});
+    if (response.status === 402 || body.outcome === "402") {
+      showUnavailable(text);
+      return;
+    }
+    if (!response.ok) {
+      addBubble("agent", body.reply ?? (englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan."));
+      return;
+    }
+    addBubble("agent", body.reply ?? (englishMessage(text) ? "The price table could not be read." : "Tabel harga tidak dapat dibaca."));
+  } catch {
+    showOutage(text);
+  } finally {
+    send.disabled = false;
+    field.focus();
+  }
 }
 
 const draft = readDraft();
 const restored = factsBubble(draft);
 addBubble("agent", restored || opening);
 
-form.addEventListener("submit", async (event) => {
+form.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = field.value.trim();
   if (!text) {
     return;
   }
   field.value = "";
-  addBubble("visitor", text);
-  const button = form.querySelector("button");
-  button.disabled = true;
-  try {
-    const response = await fetch("/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, draft: readDraft() }),
-    });
-    const body = await response.json();
-    saveDraft(body.draft ?? {});
-    addBubble("agent", body.reply ?? "Tabel harga tidak dapat dibaca.", usageLine(body.usage, body.credits));
-  } catch {
-    addBubble("agent", "Tabel harga tidak dapat dibaca.");
-  } finally {
-    button.disabled = false;
-    field.focus();
-  }
+  sendChat(text, true);
 });
+
+loadBrand();
 
 field.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {

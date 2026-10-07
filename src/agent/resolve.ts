@@ -7,6 +7,7 @@ import {
   normalizeVisitorText,
   type NameHit,
 } from "../mcp/published-names.js";
+import { extraGuardrail } from "./extra-guardrail.js";
 import { replyLanguage, replies } from "./language.js";
 
 export type Selection =
@@ -66,6 +67,11 @@ const months: Record<string, string> = {
 export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
   const normalized = normalizeVisitorText(text);
   const language = replyLanguage(text);
+  // Workshop exercise: one extra bilingual rule. See extra-guardrail.ts.
+  const extra = extraGuardrail(normalized, language);
+  if (extra) {
+    return stop("offtopic", extra);
+  }
   if (isOffTopic(normalized)) {
     return stop("offtopic", replies[language].offtopic);
   }

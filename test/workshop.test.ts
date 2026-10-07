@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { emptyDraft, type HandoffRecord, type SessionDraft } from "../src/domain.js";
 import type { HandoffDb } from "../src/agent/handoff.js";
+import { openWorkshopDb, seedTenant } from "./sqlite-db.js";
 import { handleVisitorMessage } from "../src/agent/handle-request.js";
 import { handleFetch, type AppBindings } from "../src/routes.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
-import { outOfCreditsReply, tenantIdFrom } from "../src/workshop/credits.js";
+import { namedTenantFrom, outOfCreditsReply, tenantIdFrom, tenantNotFoundReply } from "../src/workshop/credits.js";
 import { projectMonthly } from "../src/workshop/cost-projection.js";
 import { readEstimateFlags, resolveSample } from "../scripts/cost-estimate.js";
 import { isPeakUtc, priceTokens, readTokenUsage, zeroUsage } from "../src/workshop/token-usage.js";
@@ -55,6 +56,7 @@ describe("token usage", () => {
       promptTokens: 180,
       completionTokens: 60,
       totalTokens: 240,
+      reasoningTokens: 0,
       estCostUsd: 0.00006006,
       estCostIdr: 1,
     });
@@ -62,9 +64,21 @@ describe("token usage", () => {
       promptTokens: 180,
       completionTokens: 60,
       totalTokens: 240,
+      reasoningTokens: 0,
       estCostUsd: 0.00012012,
       estCostIdr: 2,
     });
+    const withReasoning = {
+      usage: {
+        prompt_tokens: 180,
+        completion_tokens: 850,
+        total_tokens: 1030,
+        completion_tokens_details: { reasoning_tokens: 822 },
+      },
+    };
+    const priced = readTokenUsage(withReasoning, offPeak);
+    expect(priced.reasoningTokens).toBe(822);
+    expect(priced.totalTokens).toBe(1030);
     expect(readTokenUsage({ usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 99 } }, offPeak).totalTokens).toBe(99);
     expect(readTokenUsage({})).toEqual(zeroUsage());
     expect(priceTokens(1_000_000, 0, 1_000_000, offPeak).estCostUsd).toBe(0.143);
@@ -94,7 +108,7 @@ describe("token usage", () => {
       writeHandoff: async () => undefined,
       apiKey: "test-key",
       fetchImpl,
-      creditsRemaining: 3,
+      creditsRemaining: 5_000,
       now: offPeak,
       requestId: "req-usage",
     });
@@ -115,10 +129,14 @@ describe("tenant credits", () => {
     expect(tenantIdFrom(new Request("http://local/chat"))).toBe("demo");
     expect(tenantIdFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "ACME_1" } }))).toBe("acme_1");
     expect(tenantIdFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "../etc" } }))).toBe("demo");
+    expect(namedTenantFrom(new Request("http://local/chat"))).toBeNull();
+    expect(namedTenantFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "Sim-Day" } }))).toBe("sim-day");
+    expect(namedTenantFrom(new Request("http://local/chat", { headers: { "x-tenant-id": "../etc" } }))).toBeNull();
   });
 
   it("refuses a price question in the visitor's language and does not call the model", async () => {
     const indonesian = await ask("harga beras di Jakarta", { apiKey: "test-key", creditsRemaining: 0 });
+    expect(indonesian.result.outcome).toBe("402");
     expect(indonesian.result.log.errorClass).toBe("out_of_credits");
     expect(indonesian.result.log.wordingMs).toBe(0);
     expect(indonesian.result.reply).toBe(outOfCreditsReply("id"));
@@ -164,54 +182,6 @@ describe("cost projection", () => {
   });
 });
 
-function memoryDb(seed: Record<string, number>) {
-  const credits = new Map(Object.entries(seed));
-  const usage: unknown[][] = [];
-  const db = {
-    prepare(query: string) {
-      return {
-        bind(...values: unknown[]) {
-          return {
-            async run() {
-              if (query.includes("INSERT OR IGNORE INTO tenant_credit")) {
-                const id = String(values[0]);
-                if (!credits.has(id)) {
-                  credits.set(id, Number(values[1]));
-                }
-              } else if (query.includes("UPDATE tenant_credit")) {
-                const id = String(values[0]);
-                const current = credits.get(id) ?? 0;
-                if (current >= 1) {
-                  credits.set(id, current - 1);
-                }
-              } else if (query.includes("INSERT INTO request_usage")) {
-                usage.push(values);
-              }
-            },
-            async all<T>(): Promise<{ results: T[] }> {
-              if (query.includes("SELECT balance FROM")) {
-                const id = String(values[0]);
-                if (!credits.has(id)) {
-                  return { results: [] };
-                }
-                return { results: [{ balance: credits.get(id) }] as T[] };
-              }
-              if (query.includes("SELECT tenant_id")) {
-                const results = [...credits.entries()]
-                  .sort(([left], [right]) => left.localeCompare(right))
-                  .map(([tenant_id, balance]) => ({ tenant_id, balance }));
-                return { results: results as T[] };
-              }
-              return { results: [] };
-            },
-          };
-        },
-      };
-    },
-  };
-  return { db: db as unknown as HandoffDb, credits, usage };
-}
-
 function app(db: HandoffDb, extra: Partial<AppBindings> = {}): AppBindings {
   return {
     PRICE_SOURCE: "mock",
@@ -249,16 +219,18 @@ describe("chat route", () => {
     expect(response.status).toBe(400);
   });
 
-  it("logs a free refusal and serves the credit list only with the workshop key", async () => {
-    const { db, usage, credits } = memoryDb({ demo: 50 });
+  it("logs a free refusal and serves tokens plus credits only with the workshop key", async () => {
+    const { db, sqlite } = openWorkshopDb();
     const env = app(db);
     const response = await postChat(env, "How do I cook rice?");
     expect(response.status).toBe(200);
-    const body = await response.json() as { usage: { totalTokens: number }; credits: { cost: number; remaining: number } };
-    expect(body.usage.totalTokens).toBe(0);
-    expect(body.credits).toEqual({ tenantId: "demo", remaining: 50, cost: 0 });
-    expect(credits.get("demo")).toBe(50);
-    expect(JSON.stringify(usage)).not.toContain("cook");
+    const body = await response.json() as { reply: string; outcome: string };
+    expect(body.outcome).toBe("refusal");
+    expect(body).not.toHaveProperty("usage");
+    expect(body).not.toHaveProperty("credits");
+    expect(body).not.toHaveProperty("balance_tokens");
+    expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'demo'").get()).toMatchObject({ balance: 50_000 });
+    expect(JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all())).not.toContain("cook");
 
     const hidden = await handleFetch(new Request("http://local/credits"), env, async () => new Response());
     expect(hidden.status).toBe(401);
@@ -268,12 +240,14 @@ describe("chat route", () => {
       async () => new Response(),
     );
     expect(shown.status).toBe(200);
-    const listed = await shown.json() as { credits: { tenantId: string; balance: number }[] };
-    expect(listed.credits).toEqual([{ tenantId: "demo", balance: 50 }]);
+    const listed = await shown.json() as { credits: { tenantId: string; tokens: number; credits: number }[] };
+    expect(listed.credits).toEqual([{ tenantId: "demo", tokens: 50_000, credits: 50 }]);
   });
 
-  it("spends one credit on a model answer and then refuses without calling the model", async () => {
-    const { db, usage } = memoryDb({ low: 1 });
+  it("deducts the actual tokens, then returns 402 under two credits without a model call", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    seedTenant(sqlite, "low", 5_000);
+    seedTenant(sqlite, "thin", 1_000);
     const env = app(db, { ASTRAFLOW_API_KEY: "test-key" });
     const fetchImpl = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -285,28 +259,65 @@ describe("chat route", () => {
     try {
       const first = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "low" });
       expect(first.status).toBe(200);
-      const answered = await first.json() as {
-        usage: { promptTokens: number; completionTokens: number; totalTokens: number; estCostUsd: number };
-        credits: { tenantId: string; remaining: number; cost: number };
-      };
-      expect(answered.usage).toMatchObject({ promptTokens: 180, completionTokens: 60, totalTokens: 240 });
-      expect(answered.usage.estCostUsd).toBeGreaterThan(0);
-      expect(answered.credits).toEqual({ tenantId: "low", remaining: 0, cost: 1 });
+      const answered = await first.json() as { reply: string; outcome: string };
+      expect(answered.outcome).toBe("answered");
+      expect(answered).not.toHaveProperty("usage");
+      expect(answered).not.toHaveProperty("credits_left");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 4_760 });
+      expect(sqlite.prepare("SELECT total_tokens, est_cost_usd FROM request_usage WHERE tenant_id = 'low'").get()).toMatchObject({
+        total_tokens: 240,
+      });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
 
       const refused = await postChat(env, "How do I cook rice?", { "x-tenant-id": "low" });
       expect(refused.status).toBe(200);
-      const free = await refused.json() as { credits: { cost: number; remaining: number } };
-      expect(free.credits).toEqual({ tenantId: "low", remaining: 0, cost: 0 });
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 4_760 });
 
-      const blocked = await postChat(env, "What's the price of rice in Jakarta?", { "x-tenant-id": "low" });
+      const blocked = await postChat(env, "What's the price of rice in Jakarta?", { "x-tenant-id": "thin" });
       expect(blocked.status).toBe(402);
-      const body = await blocked.json() as { reply: string; credits: { cost: number; remaining: number } };
+      const body = await blocked.json() as { outcome: string; reply: string };
+      expect(body.outcome).toBe("402");
       expect(body.reply).toBe(outOfCreditsReply("en"));
-      expect(body.credits).toEqual({ tenantId: "low", remaining: 0, cost: 0 });
+      expect(body.reply.toLowerCase()).not.toContain("kredit");
+      expect(body.reply.toLowerCase()).not.toContain("credit");
+      expect(body.reply.toLowerCase()).not.toContain("admin");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'thin'").get()).toMatchObject({ balance: 1_000 });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(usage)).not.toContain("Jakarta");
-      expect(JSON.stringify(usage)).toContain("180");
+      const stored = JSON.stringify(sqlite.prepare("SELECT * FROM request_usage").all());
+      expect(stored).not.toContain("Jakarta");
+      expect(stored).toContain("180");
+      expect(stored).toContain("402");
+    } finally {
+      fetchImpl.mockRestore();
+    }
+  });
+
+  it("returns not-found for a named tenant that does not exist and creates nothing", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    const env = app(db, { ASTRAFLOW_API_KEY: "test-key" });
+    const fetchImpl = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    });
+    try {
+      const before = sqlite.prepare("SELECT COUNT(*) AS n FROM tenant_credit").get() as { n: number };
+      const indonesian = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "sim-missing" });
+      expect(indonesian.status).toBe(404);
+      const idBody = await indonesian.json() as { reply: string; outcome: string };
+      expect(idBody.reply).toBe(tenantNotFoundReply("id"));
+      expect(idBody.outcome).toBe("refusal");
+      expect(idBody).not.toHaveProperty("balance_tokens");
+
+      const english = await postChat(env, "What's the price of rice?", { "x-tenant-id": "sim-missing" });
+      expect(english.status).toBe(404);
+      const enBody = await english.json() as { reply: string };
+      expect(enBody.reply).toBe(tenantNotFoundReply("en"));
+
+      const after = sqlite.prepare("SELECT COUNT(*) AS n FROM tenant_credit").get() as { n: number };
+      expect(after.n).toBe(before.n);
+      expect(sqlite.prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = 'sim-missing'").get()).toBeUndefined();
+      expect(sqlite.prepare("SELECT COUNT(*) AS n FROM request_usage").get()).toMatchObject({ n: 0 });
+      expect(fetchImpl).not.toHaveBeenCalled();
     } finally {
       fetchImpl.mockRestore();
     }
