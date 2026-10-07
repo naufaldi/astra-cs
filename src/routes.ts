@@ -184,7 +184,7 @@ function sanitizeDraft(body: unknown): SessionDraft {
 }
 
 async function handleAdmin(request: Request, env: AppBindings, url: URL): Promise<Response> {
-  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+  if (!(await adminAuthorized(request, env.DB))) {
     return unauthorized();
   }
   const dashboard = await loadDashboard(env.DB, new Date());
@@ -194,7 +194,7 @@ async function handleAdmin(request: Request, env: AppBindings, url: URL): Promis
 }
 
 async function handleTopup(request: Request, env: AppBindings): Promise<Response> {
-  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+  if (!(await adminAuthorized(request, env.DB))) {
     return unauthorized();
   }
   const form = await readAdminForm(request);
@@ -216,7 +216,7 @@ async function handleTopup(request: Request, env: AppBindings): Promise<Response
 }
 
 async function handleNewTenant(request: Request, env: AppBindings): Promise<Response> {
-  if (!(await adminAuthorized(request, env.WORKSHOP_KEY ?? ""))) {
+  if (!(await adminAuthorized(request, env.DB))) {
     return unauthorized();
   }
   const form = await readAdminForm(request);

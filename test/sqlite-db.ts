@@ -4,10 +4,10 @@ import type { HandoffDb } from "../src/agent/handoff.js";
 
 type SqlValue = string | number | bigint | Uint8Array | null;
 
-/** Apply migrations 0001–0004 to a memory database. Demo starts at 50,000 tokens. */
+/** Apply migrations 0001–0006 to a memory database. Demo starts at 50,000 tokens. */
 export function openWorkshopDb(): { db: HandoffDb; sqlite: DatabaseSync } {
   const sqlite = new DatabaseSync(":memory:");
-  for (const name of ["0001_handoff.sql", "0002_request_usage.sql", "0003_tenant_credit.sql", "0004_credit_ledger.sql", "0005_tenant_name.sql"]) {
+  for (const name of ["0001_handoff.sql", "0002_request_usage.sql", "0003_tenant_credit.sql", "0004_credit_ledger.sql", "0005_tenant_name.sql", "0006_admins.sql"]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
   }
   const db: HandoffDb = {

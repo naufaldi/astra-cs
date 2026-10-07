@@ -1,5 +1,5 @@
 /**
- * Server-rendered admin page. One refresh script, and no workshop key in the markup.
+ * Server-rendered admin page. One refresh script, and no admin password in the markup.
  * Top-up and new-tenant forms live in dialogs so a refresh can pause while they are open.
  */
 

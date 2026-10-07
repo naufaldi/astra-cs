@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { hashAdminPassword } from "../src/admin/auth.js";
 import { renderAdmin } from "../src/admin/page.js";
 import { loadDashboard, totalsFrom } from "../src/admin/queries.js";
 import { handleFetch, type AppBindings } from "../src/routes.js";
@@ -15,8 +16,8 @@ import { openWorkshopDb, seedTenant } from "./sqlite-db.js";
 const offPeak = new Date("2026-10-06T12:30:00.000Z");
 const peak = new Date("2026-10-06T03:00:00.000Z");
 
-function basic(password: string): string {
-  return `Basic ${Buffer.from(`owner:${password}`).toString("base64")}`;
+function basic(username: string, password: string): string {
+  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
 }
 
 function app(db: AppBindings["DB"], extra: Partial<AppBindings> = {}): AppBindings {
@@ -53,7 +54,7 @@ async function postForm(env: AppBindings, path: string, fields: Record<string, s
     new Request(`http://local${path}`, {
       method: "POST",
       headers: {
-        authorization: basic("workshop-test-key"),
+        authorization: basic("admin", "admin"),
         "content-type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams(fields),
@@ -190,7 +191,7 @@ describe("ledger and admin", () => {
       expect(totalsFrom(dashboard.allTime.tokens, dashboard.allTime.chargedTokens, dashboard.allTime.costIdr, 500).marginIdr).toBe(dashboard.allTime.marginIdr);
 
       const page = await handleFetch(
-        new Request("http://local/admin?ok=topup&tenant=demo&credits=5", { headers: { authorization: basic("workshop-test-key") } }),
+        new Request("http://local/admin?ok=topup&tenant=demo&credits=5", { headers: { authorization: basic("admin", "admin") } }),
         env,
         async () => new Response("mcp"),
       );
@@ -240,6 +241,55 @@ describe("ledger and admin", () => {
     }
   });
 
+  it("accepts the seeded admin account and still requires the workshop key for /credits", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    const env = app(db);
+    const seeded = sqlite.prepare("SELECT username, password_hash, created_at FROM admins").get() as {
+      username: string;
+      password_hash: string;
+      created_at: string;
+    };
+    expect(seeded).toMatchObject({ username: "admin", created_at: "2026-10-07T00:00:00.000Z" });
+    expect(seeded.password_hash).toBe(await hashAdminPassword("admin"));
+    expect(seeded.password_hash).not.toBe("admin");
+
+    const missing = await handleFetch(new Request("http://local/admin"), env, async () => new Response("mcp"));
+    expect(missing.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toContain("Basic");
+    expect(await missing.text()).toBe("Login with your admin account");
+
+    const wrong = await handleFetch(
+      new Request("http://local/admin", { headers: { authorization: basic("admin", "wrong") } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    expect(wrong.status).toBe(401);
+
+    const ok = await handleFetch(
+      new Request("http://local/admin", { headers: { authorization: basic("admin", "admin") } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    expect(ok.status).toBe(200);
+    const html = await ok.text();
+    expect(html).toContain("Credits admin");
+    expect(html).not.toContain(seeded.password_hash);
+    expect(html).not.toContain("astra-cs-workshop-admin-v1");
+
+    const creditsAsAdmin = await handleFetch(
+      new Request("http://local/credits", { headers: { authorization: basic("admin", "admin") } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    expect(creditsAsAdmin.status).toBe(401);
+    const creditsWithKey = await handleFetch(
+      new Request("http://local/credits", { headers: { "x-workshop-key": "workshop-test-key" } }),
+      env,
+      async () => new Response("mcp"),
+    );
+    expect(creditsWithKey.status).toBe(200);
+  });
+
   it("returns 401 without the key and lists the same handoffs as D1", async () => {
     const { db, sqlite } = openWorkshopDb();
     const env = app(db);
@@ -247,7 +297,7 @@ describe("ledger and admin", () => {
     expect(hidden.status).toBe(401);
     expect(hidden.headers.get("www-authenticate")).toContain("Basic");
     const wrong = await handleFetch(
-      new Request("http://local/admin", { headers: { authorization: basic("nope") } }),
+      new Request("http://local/admin", { headers: { authorization: basic("admin", "nope") } }),
       env,
       async () => new Response("mcp"),
     );
@@ -307,7 +357,7 @@ describe("ledger and admin", () => {
     expect(sqlite.prepare("SELECT tenant_id FROM tenant_credit WHERE tenant_id = 'not-here'").get()).toBeUndefined();
 
     const page = await handleFetch(
-      new Request("http://local/admin?ok=created&tenant=sim-zero", { headers: { authorization: basic("workshop-test-key") } }),
+      new Request("http://local/admin?ok=created&tenant=sim-zero", { headers: { authorization: basic("admin", "admin") } }),
       env,
       async () => new Response("mcp"),
     );
@@ -355,7 +405,7 @@ describe("ledger and admin", () => {
     expect(balanceBadge(5_000)).toBe("low");
     expect(balanceBadge(50_000)).toBeNull();
     const page = await handleFetch(
-      new Request("http://local/admin", { headers: { authorization: basic("workshop-test-key") } }),
+      new Request("http://local/admin", { headers: { authorization: basic("admin", "admin") } }),
       env,
       async () => new Response("mcp"),
     );
