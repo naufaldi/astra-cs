@@ -1,0 +1,6 @@
+ASTRAFLOW_API_KEY=
+# Optional override. Leave blank to use deepseek-v4.1-flash.
+ASTRAFLOW_MODEL=
+# Set to on to let the model reason (about 5x the tokens). Leave blank for the cheap default.
+ASTRAFLOW_THINKING=
+WORKSHOP_KEY=

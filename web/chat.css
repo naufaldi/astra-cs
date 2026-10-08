@@ -1,0 +1,126 @@
+:root {
+  color-scheme: light;
+  --canvas: #f4f5f0;
+  --paper: #fffcf7;
+  --ink: #1c1917;
+  --slate: #57534e;
+  --ember: #c2410c;
+  --line: #e7e5e4;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background:
+    radial-gradient(circle at 20% 10%, rgb(194 65 12 / 8%), transparent 28%),
+    var(--canvas);
+  color: var(--ink);
+}
+
+.thread {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 720px;
+  margin: 0 auto;
+  background: rgb(255 252 247 / 72%);
+  overflow: hidden;
+}
+
+.bar {
+  flex: none;
+  padding: 14px 16px;
+  background: var(--ink);
+  color: var(--canvas);
+}
+
+.name { margin: 0; font-weight: 700; }
+.status { margin: 2px 0 0; color: #d6d3d1; font-size: 0.85rem; }
+
+.transcript {
+  flex: 1;
+  list-style: none;
+  margin: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.bubble {
+  max-width: min(85%, 34rem);
+  padding: 10px 12px;
+  border-radius: 16px;
+  line-height: 1.4;
+}
+
+.bubble p { margin: 0; white-space: pre-wrap; }
+.bubble time { display: block; margin-top: 6px; font-size: 0.75rem; color: var(--slate); }
+.bubble .meta { margin-top: 4px; font-size: 0.75rem; color: var(--slate); }
+
+.agent { align-self: flex-start; background: var(--paper); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.visitor { align-self: flex-end; background: var(--ink); color: var(--canvas); border-bottom-right-radius: 4px; }
+.visitor time { color: #d6d3d1; }
+
+.system {
+  align-self: center;
+  max-width: min(92%, 34rem);
+  background: #e7e5e4;
+  color: #44403c;
+  border-radius: 16px;
+}
+
+.system strong { display: block; }
+.system p { margin-top: 4px; }
+.system button {
+  margin-top: 8px;
+  background: #44403c;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+  flex: none;
+}
+
+textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 10px 14px;
+  font: inherit;
+  color: var(--ink);
+  background: white;
+}
+
+button {
+  border: 0;
+  border-radius: 18px;
+  padding: 0 16px;
+  background: var(--ember);
+  color: white;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.6; cursor: wait; }
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
