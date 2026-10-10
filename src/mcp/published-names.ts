@@ -75,6 +75,7 @@ const commodityAliases: readonly Alias[] = [
   { phrase: "cabe", id: "", ambiguous: true },
   { phrase: "daging ayam", id: "daging-ayam" },
   { phrase: "daging sapi", id: "daging-sapi" },
+  { phrase: "daging", id: "", ambiguous: true },
   { phrase: "telur ayam", id: "telur-ayam" },
   { phrase: "telur", id: "telur-ayam" },
   { phrase: "gula pasir", id: "gula-pasir" },
@@ -192,6 +193,33 @@ export function matchProvinces(text: string): string[] {
     }
   }
   return hits.sort((left, right) => left.start - right.start).map((hit) => hit.name);
+}
+
+const genericFamilies: readonly { pattern: RegExp; ids: readonly string[] }[] = [
+  { pattern: /\b(cabai|cabe)\b/u, ids: ["cabai-merah", "cabai-rawit"] },
+  { pattern: /\bbawang\b/u, ids: ["bawang-merah", "bawang-putih"] },
+  { pattern: /\bayam\b/u, ids: ["daging-ayam", "telur-ayam"] },
+  { pattern: /\bdaging\b/u, ids: ["daging-ayam", "daging-sapi"] },
+];
+
+/** Published rows a generic family word covers, in map order. */
+export function ambiguousVariants(text: string): Commodity[] {
+  const haystack = normalizeVisitorText(text);
+  const ids: string[] = [];
+  for (const family of genericFamilies) {
+    if (!family.pattern.test(haystack)) {
+      continue;
+    }
+    for (const id of family.ids) {
+      if (!ids.includes(id)) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids.flatMap((id) => {
+    const commodity = commodityById(id);
+    return commodity ? [commodity] : [];
+  });
 }
 
 export function commodityById(id: string): Commodity | undefined {
