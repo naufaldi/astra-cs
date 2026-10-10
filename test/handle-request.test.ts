@@ -197,6 +197,26 @@ describe("visitor questions", () => {
     expect(overrideBody.model).toBe("custom-model");
   });
 
+  it("posts to the AstraFlow chat completions endpoint", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        choices: [{ message: { content: "Pada tanggal perdagangan 2026-10-05, harga Beras di Aceh adalah Rp15.700 per kg." } }],
+      }),
+    );
+    await handleVisitorMessage({
+      text: "harga beras di Aceh",
+      draft: emptyDraft(),
+      readTable: (commodityId, dateToken) => readPriceTable({ source: "mock", commodityId, dateToken }),
+      writeHandoff: async () => undefined,
+      apiKey: "test-key",
+      fetchImpl,
+      now,
+      requestId: "req-endpoint",
+    });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("https://api-sg.umodelverse.ai/v1/chat/completions");
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("POST");
+  });
+
   it("answers from the template and logs the upstream error when AstraFlow rejects the call", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
       Response.json(

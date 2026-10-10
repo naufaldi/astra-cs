@@ -136,24 +136,27 @@ async function sendChat(text, showVisitor) {
   lastText = text;
   send.disabled = true;
   try {
-    const headers = { "content-type": "application/json" };
-    if (tenantParam) headers["x-tenant-id"] = tenantParam;
-    const response = await fetch("/chat", {
+    const response = await fetch("https://api-sg.umodelverse.ai/v1/chat/completions", {
       method: "POST",
-      headers,
-      body: JSON.stringify({ text, draft: readDraft() }),
+      headers: {
+        authorization: "Bearer sk-workshop-placeholder",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek-ai/DeepSeek-V3",
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: text },
+        ],
+      }),
     });
     const body = await response.json();
-    saveDraft(body.draft ?? {});
-    if (response.status === 402 || body.outcome === "402") {
-      showUnavailable(text);
+    const reply = body?.choices?.[0]?.message?.content;
+    if (!response.ok || typeof reply !== "string" || reply.trim() === "") {
+      showOutage(text);
       return;
     }
-    if (!response.ok) {
-      addBubble("agent", body.reply ?? (englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan."));
-      return;
-    }
-    addBubble("agent", body.reply ?? (englishMessage(text) ? "The price table could not be read." : "Tabel harga tidak dapat dibaca."));
+    addBubble("agent", reply);
   } catch {
     showOutage(text);
   } finally {
