@@ -47,6 +47,31 @@ function factsBubble(draft) {
   return lines.join("\n");
 }
 
+let sending = false;
+
+function setBusy(busy) {
+  sending = busy;
+  send.disabled = busy;
+  field.disabled = busy;
+}
+
+/** Agent bubble shown while /chat has not answered yet. */
+function addTypingBubble() {
+  const item = document.createElement("li");
+  item.className = "bubble agent typing";
+  item.setAttribute("role", "status");
+  item.setAttribute("aria-label", "Sedang mengetik");
+  const dots = document.createElement("p");
+  dots.className = "typing-dots";
+  for (let dot = 0; dot < 3; dot += 1) {
+    dots.append(document.createElement("span"));
+  }
+  item.append(dots);
+  transcript.append(item);
+  item.scrollIntoView({ block: "end" });
+  return item;
+}
+
 function addBubble(role, text) {
   const item = document.createElement("li");
   item.className = `bubble ${role}`;
@@ -132,9 +157,11 @@ async function sendChat(text, showVisitor) {
     addBubble("agent", englishMessage(text) ? "This service was not found." : "Layanan ini tidak ditemukan.");
     return;
   }
+  if (sending) return;
   if (showVisitor) addBubble("visitor", text);
   lastText = text;
-  send.disabled = true;
+  const typing = addTypingBubble();
+  setBusy(true);
   try {
     const headers = { "content-type": "application/json" };
     if (tenantParam) headers["x-tenant-id"] = tenantParam;
@@ -157,7 +184,8 @@ async function sendChat(text, showVisitor) {
   } catch {
     showOutage(text);
   } finally {
-    send.disabled = false;
+    typing.remove();
+    setBusy(false);
     field.focus();
   }
 }
@@ -168,6 +196,9 @@ addBubble("agent", restored || opening);
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (sending) {
+    return;
+  }
   const text = field.value.trim();
   if (!text) {
     return;
@@ -181,6 +212,9 @@ loadBrand();
 field.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (sending) {
+      return;
+    }
     form.requestSubmit();
   }
 });
