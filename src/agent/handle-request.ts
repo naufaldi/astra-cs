@@ -5,6 +5,7 @@ import {
   type ReadResult,
   type RequestLog,
   type SessionDraft,
+  type WordingPath,
 } from "../domain.js";
 import {
   missingProvincePrice,
@@ -14,8 +15,9 @@ import {
   reviewClaim,
   sourceCitation,
 } from "./language.js";
+import { wordingKeepsFacts } from "./check-wording.js";
 import { factsFromPhrase, provincesFromPhrase, selectRows } from "./select.js";
-import { phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
+import { buildWordingPayload, phraseFromFacts, phraseResolved, WordingUnavailable, type WordingPayload } from "./phrase.js";
 import { resolveQuestion, type ResolvedClaim } from "./resolve.js";
 import { passesCreditGate } from "../workshop/charge-credits.js";
 import { outOfCreditsReply } from "../workshop/credits.js";
@@ -29,6 +31,7 @@ export type HandleResult = {
   wordingPayload: WordingPayload | null;
   usage: TokenUsage;
   modelCalled: boolean;
+  wording: WordingPath;
 };
 
 /** Answer one visitor message. The server does not keep the draft. */
@@ -39,6 +42,10 @@ export async function handleVisitorMessage(input: {
   writeHandoff: (row: HandoffRecord) => Promise<void>;
   apiKey?: string;
   model?: string;
+  /** `ASTRAFLOW_THINKING`. `on` keeps reasoning; anything else turns it off. */
+  thinking?: string;
+  tenantId?: string;
+  wordingTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   now?: Date;
   requestId?: string;
@@ -148,35 +155,44 @@ export async function handleVisitorMessage(input: {
   let wordingPayload: WordingPayload | null = null;
   let usage = zeroUsage();
   let modelCalled = false;
+  let wordingErrorClass: string | null = null;
+  let wording: WordingPath = "none";
+  let upstream: { upstreamClass?: string; upstreamMessage?: string } = {};
+  let phrased: Awaited<ReturnType<typeof phraseResolved>>;
   try {
-    const phrased = await phraseResolved(selected, input.text, {
+    phrased = await phraseResolved(selected, input.text, {
       apiKey: input.apiKey,
       model: input.model,
       fetchImpl: input.fetchImpl,
       now,
+      thinking: input.thinking,
+      user: input.tenantId,
+      timeoutMs: input.wordingTimeoutMs,
     });
-    usage = phrased.usage;
-    modelCalled = phrased.calledAstra;
-    reply = `${phrased.reply} ${sourceCitation(language, read.table.tanggalPerdagangan)}`;
-    wordingPayload = phrased.payload;
   } catch (error) {
-    const upstream = wordingFailure(error);
-    return finish({
-      reply: replies[language].wording,
-      draft,
-      outcome: "refusal",
-      commodity: read.table.komoditas,
-      tradingDate: read.table.tanggalPerdagangan,
-      priceReadMs,
-      wordingMs: Date.now() - wordingStarted,
-      errorClass: "wording_unavailable",
-      upstreamClass: upstream.upstreamClass,
-      upstreamMessage: upstream.upstreamMessage,
-      wordingPayload: null,
-      now,
-      requestId,
-    });
+    // ADR 0014: a gateway fault is not the visitor's problem. Template answer, no charge.
+    const failed = error instanceof WordingUnavailable ? error : new WordingUnavailable("network", "wording unavailable");
+    upstream = { upstreamClass: failed.upstreamClass, upstreamMessage: failed.upstreamMessage };
+    wording = "fallback";
+    wordingErrorClass = "wording_fallback";
+    phrased = { reply: phraseFromFacts(selected, language), payload: buildWordingPayload(selected, input.text), calledAstra: false, usage: zeroUsage() };
   }
+  usage = phrased.usage;
+  modelCalled = phrased.calledAstra;
+  wordingPayload = phrased.payload;
+  if (wording === "fallback") {
+    reply = phrased.reply;
+  } else if (!phrased.calledAstra) {
+    reply = phrased.reply;
+  } else if (wordingKeepsFacts(phrased.reply, selected)) {
+    reply = phrased.reply;
+    wording = "astra";
+  } else {
+    wording = "rejected";
+    reply = phraseFromFacts(selected, language);
+    wordingErrorClass = "wording_rejected";
+  }
+  reply = `${reply} ${sourceCitation(language, read.table.tanggalPerdagangan)}`;
   const wordingMs = Date.now() - wordingStarted;
   const nextDraft: SessionDraft = {
     commodity: read.table.komoditas,
@@ -208,10 +224,12 @@ export async function handleVisitorMessage(input: {
     tradingDate: read.table.tanggalPerdagangan,
     priceReadMs,
     wordingMs,
-    errorClass: null,
+    errorClass: wordingErrorClass,
+    ...upstream,
     wordingPayload,
     usage,
     modelCalled,
+    wording,
     now,
     requestId,
   });
@@ -268,17 +286,6 @@ async function fillClaim(
   };
 }
 
-function wordingFailure(error: unknown): { upstreamClass: string; upstreamMessage: string } {
-  if (error instanceof WordingUnavailable) {
-    return { upstreamClass: error.upstreamClass, upstreamMessage: error.upstreamMessage };
-  }
-  const message = error instanceof Error ? error.message : "wording unavailable";
-  return {
-    upstreamClass: "network",
-    upstreamMessage: message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\s+/g, " ").trim().slice(0, 300),
-  };
-}
-
 function readErrorReply(
   error: "unpublished_date" | "unknown_commodity" | "read_failed",
   language: ReturnType<typeof replyLanguage>,
@@ -311,6 +318,7 @@ function finish(input: {
   wordingPayload: WordingPayload | null;
   usage?: TokenUsage;
   modelCalled?: boolean;
+  wording?: WordingPath;
   now: Date;
   requestId: string;
 }): HandleResult {
@@ -321,6 +329,7 @@ function finish(input: {
     wordingPayload: input.wordingPayload,
     usage: input.usage ?? zeroUsage(),
     modelCalled: input.modelCalled ?? false,
+    wording: input.wording ?? "none",
     log: {
       time: input.now.toISOString(),
       requestId: input.requestId,
@@ -330,6 +339,7 @@ function finish(input: {
       priceReadMs: input.priceReadMs,
       wordingMs: input.wordingMs,
       errorClass: input.errorClass,
+      wordingPath: input.wording ?? "none",
       ...(input.upstreamClass
         ? { upstreamClass: input.upstreamClass, upstreamMessage: input.upstreamMessage ?? "" }
         : {}),

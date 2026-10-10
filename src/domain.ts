@@ -72,6 +72,14 @@ export type HandoffRecord = {
   claimedPrice: number;
 };
 
+/**
+ * Which path produced the reply wording.
+ * astra: the model sentence. fallback: the call failed or timed out and the template answered.
+ * rejected: the model sentence dropped the price or date and the template replaced it.
+ * none: no wording call happened (no key, refusal, claim, or the credit gate).
+ */
+export type WordingPath = "astra" | "fallback" | "rejected" | "none";
+
 export type RequestLog = {
   time: string;
   requestId: string;
@@ -81,6 +89,7 @@ export type RequestLog = {
   priceReadMs: number;
   wordingMs: number;
   errorClass: string | null;
+  wordingPath: WordingPath;
   upstreamClass?: string;
   upstreamMessage?: string;
 };

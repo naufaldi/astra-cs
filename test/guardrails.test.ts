@@ -194,3 +194,32 @@ describe("empty message", () => {
     expect(body.reply).toBe("Tulis pertanyaan harga.");
   });
 });
+
+describe("off-topic after a price", () => {
+  const draft: SessionDraft = {
+    commodity: "Beras",
+    provinces: ["Jawa Barat"],
+    tradingDate: "2026-10-05",
+    facts: [{ komoditas: "Beras", provinsi: "Jawa Barat", harga: 15600, satuan: "kg" }],
+    claimedPrice: null,
+  };
+
+  it("refuses an off-topic question with the normal refusal, not a province prompt", async () => {
+    const indonesian = await ask("Siapa presiden?", draft);
+    expect(indonesian.result.log.errorClass).toBe("offtopic");
+    expect(indonesian.result.reply).toBe("Saya hanya menjawab pertanyaan harga dari satu tabel Monitor Pangan.");
+    const english = await ask("Who is the president?", draft);
+    expect(english.result.log.errorClass).toBe("offtopic");
+    expect(indonesian.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("still answers follow-ups that lean on the draft commodity", async () => {
+    const province = await ask("Kalau Aceh?", draft);
+    expect(province.result.outcome).toBe("answered");
+    expect(province.result.reply).toContain("Aceh");
+    const cheapest = await ask("Yang termurah?", draft);
+    expect(cheapest.result.outcome).toBe("answered");
+    const average = await ask("Bandingkan dengan rata-rata", { ...draft, provinces: ["Jawa Barat"] });
+    expect(average.result.log.errorClass).not.toBe("offtopic");
+  });
+});

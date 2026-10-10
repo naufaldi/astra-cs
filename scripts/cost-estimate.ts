@@ -2,7 +2,7 @@
  * Print a slide-ready monthly wording cost.
  *
  *   npm run cost:estimate
- *   npm run cost:estimate -- --prompt 180 --completion 60 --share 0.4
+ *   npm run cost:estimate -- --prompt 105 --completion 31 --share 0.4
  *
  * With no token flags, the average comes from answered rows in local D1.
  * Refusals and claims stay in the share because they are free.
@@ -12,19 +12,22 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { projectMonthly } from "../src/workshop/cost-projection.js";
 
-const examplePrompt = 180;
-const exampleCompletion = 60;
+const examplePrompt = 105;
+const exampleCompletion = 31;
 const exampleShare = 0.4;
 
 type Sample = {
   promptTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
   modelShare: number;
   note: string;
 };
 
-export function readEstimateFlags(argv: string[]): { prompt?: number; completion?: number; share?: number } {
-  const flags: { prompt?: number; completion?: number; share?: number } = {};
+type EstimateFlags = { prompt?: number; completion?: number; reasoning?: number; share?: number };
+
+export function readEstimateFlags(argv: string[]): EstimateFlags {
+  const flags: EstimateFlags = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = Number(argv[index + 1]);
@@ -35,6 +38,8 @@ export function readEstimateFlags(argv: string[]): { prompt?: number; completion
       flags.prompt = value;
     } else if (flag === "--completion") {
       flags.completion = value;
+    } else if (flag === "--reasoning") {
+      flags.reasoning = value;
     } else if (flag === "--share") {
       flags.share = value;
     } else {
@@ -46,7 +51,7 @@ export function readEstimateFlags(argv: string[]): { prompt?: number; completion
 }
 
 /** Resolve tokens from flags, local D1, or a labelled example. */
-export function resolveSample(flags: { prompt?: number; completion?: number; share?: number }): Sample {
+export function resolveSample(flags: EstimateFlags): Sample {
   if (flags.prompt !== undefined || flags.completion !== undefined) {
     if (flags.prompt === undefined || flags.completion === undefined) {
       throw new Error("Pass both --prompt and --completion, or neither.");
@@ -55,6 +60,7 @@ export function resolveSample(flags: { prompt?: number; completion?: number; sha
     return {
       promptTokens: flags.prompt,
       completionTokens: flags.completion,
+      reasoningTokens: flags.reasoning ?? 0,
       modelShare,
       note: `Token source: CLI flags. Model share ${Math.round(modelShare * 100)}%${flags.share === undefined ? " (example assumption)" : ""}.`,
     };
@@ -66,15 +72,22 @@ export function resolveSample(flags: { prompt?: number; completion?: number; sha
     return {
       promptTokens: Math.round(measured.promptTokens),
       completionTokens: Math.round(measured.completionTokens),
+      reasoningTokens: Math.round(measured.reasoningTokens),
       modelShare,
       note: `Token source: local D1, ${measured.modelCalls} answered model calls out of ${measured.chats} chats (${shareNote}).`,
     };
   }
+  return exampleSample(flags.share);
+}
+
+/** The labelled fallback used when no token source exists. */
+export function exampleSample(share: number | undefined): Sample {
   return {
     promptTokens: examplePrompt,
     completionTokens: exampleCompletion,
-    modelShare: flags.share ?? exampleShare,
-    note: "Token source: labelled example (no answered rows in local D1). 180 prompt + 60 completion, 40% of chats call the model.",
+    reasoningTokens: 0,
+    modelShare: share ?? exampleShare,
+    note: `Token source: example, not measured (no answered rows in local D1). ${examplePrompt} prompt + ${exampleCompletion} completion, ${Math.round(exampleShare * 100)}% of chats call the model. Replace it with your own: npm run db:migrate:local, chat a few times with npm run dev, then rerun, or pass --prompt N --completion N [--reasoning N].`,
   };
 }
 
@@ -87,13 +100,14 @@ function main(): void {
 type AverageRow = {
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  reasoning_tokens: number | null;
   model_calls: number | null;
   chats: number | null;
 };
 
-function readLocalAverage(): { promptTokens: number; completionTokens: number; modelCalls: number; chats: number; modelShare: number } | null {
+function readLocalAverage(): { promptTokens: number; completionTokens: number; reasoningTokens: number; modelCalls: number; chats: number; modelShare: number } | null {
   const wrangler = join(process.cwd(), "node_modules", ".bin", "wrangler");
-  const sql = `SELECT AVG(CASE WHEN total_tokens > 0 THEN prompt_tokens END) AS prompt_tokens, AVG(CASE WHEN total_tokens > 0 THEN completion_tokens END) AS completion_tokens, SUM(CASE WHEN total_tokens > 0 THEN 1 ELSE 0 END) AS model_calls, COUNT(*) AS chats FROM request_usage`;
+  const sql = `SELECT AVG(CASE WHEN total_tokens > 0 THEN prompt_tokens END) AS prompt_tokens, AVG(CASE WHEN total_tokens > 0 THEN completion_tokens END) AS completion_tokens, AVG(CASE WHEN total_tokens > 0 THEN reasoning_tokens END) AS reasoning_tokens, SUM(CASE WHEN total_tokens > 0 THEN 1 ELSE 0 END) AS model_calls, COUNT(*) AS chats FROM request_usage`;
   let raw = "";
   try {
     raw = execFileSync(wrangler, ["d1", "execute", "monitor-pangan-handoff", "--local", "--json", "--command", sql], {
@@ -112,6 +126,7 @@ function readLocalAverage(): { promptTokens: number; completionTokens: number; m
   return {
     promptTokens: Number(row.prompt_tokens ?? 0),
     completionTokens: Number(row.completion_tokens ?? 0),
+    reasoningTokens: Number(row.reasoning_tokens ?? 0),
     modelCalls,
     chats,
     modelShare: modelCalls / chats,

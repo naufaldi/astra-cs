@@ -7,7 +7,7 @@ import { handleFetch, type AppBindings } from "../src/routes.js";
 import { readPriceTable } from "../src/mcp/read-table.js";
 import { namedTenantFrom, outOfCreditsReply, tenantIdFrom, tenantNotFoundReply } from "../src/workshop/credits.js";
 import { projectMonthly } from "../src/workshop/cost-projection.js";
-import { readEstimateFlags, resolveSample } from "../scripts/cost-estimate.js";
+import { exampleSample, readEstimateFlags, resolveSample } from "../scripts/cost-estimate.js";
 import { isPeakUtc, priceTokens, readTokenUsage, zeroUsage } from "../src/workshop/token-usage.js";
 
 const offPeak = new Date("2026-10-06T12:30:00.000Z");
@@ -157,6 +157,32 @@ describe("tenant credits", () => {
   });
 });
 
+describe("gateway failure and credits", () => {
+  it("leaves the balance alone and logs wording_fallback when AstraFlow is down", async () => {
+    const { db, sqlite } = openWorkshopDb();
+    seedTenant(sqlite, "low", 5_000);
+    const env = app(db, { ASTRAFLOW_API_KEY: "test-key" });
+    const fetchImpl = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(new Response("bad gateway", { status: 502 })),
+    );
+    try {
+      const response = await postChat(env, "harga beras di Jakarta", { "x-tenant-id": "low" });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { reply: string; outcome: string; wording: string };
+      expect(body.outcome).toBe("answered");
+      expect(body.wording).toBe("fallback");
+      expect(body.reply).toContain("Rp16.950");
+      expect(sqlite.prepare("SELECT balance FROM tenant_credit WHERE tenant_id = 'low'").get()).toMatchObject({ balance: 5_000 });
+      expect(sqlite.prepare("SELECT error_class, total_tokens FROM request_usage WHERE tenant_id = 'low'").get()).toMatchObject({
+        error_class: "wording_fallback",
+        total_tokens: 0,
+      });
+    } finally {
+      fetchImpl.mockRestore();
+    }
+  });
+});
+
 describe("cost projection", () => {
   it("prints 1,000, 10,000, and 100,000 chats and says refusals are free", () => {
     const text = projectMonthly({ promptTokens: 1_000_000, completionTokens: 0, modelShare: 1 });
@@ -167,6 +193,32 @@ describe("cost projection", () => {
     expect(text).toContain("not a live FX quote");
     expect(text).toContain("$143.00");
     expect(text).toContain("Rp2,359,500");
+    expect(text).toContain("$286.00");
+    expect(text).toContain("Rp4,719,000");
+    expect(text).toContain("7 of 24");
+    expect(text).not.toContain("reasoning");
+  });
+
+  it("names the reasoning share of the completion when it is known", () => {
+    const text = projectMonthly({ promptTokens: 130, completionTokens: 746, reasoningTokens: 700, modelShare: 0.75 });
+    expect(text).toContain("130 prompt + 746 completion tokens (of which 700 reasoning)");
+  });
+
+  it("reads the reasoning flag", () => {
+    expect(readEstimateFlags(["--prompt", "130", "--completion", "746", "--reasoning", "700"])).toEqual({
+      prompt: 130,
+      completion: 746,
+      reasoning: 700,
+    });
+    const sample = resolveSample({ prompt: 130, completion: 746, reasoning: 700 });
+    expect(sample.reasoningTokens).toBe(700);
+  });
+
+  it("tells a fresh clone how to replace the example with measured numbers", () => {
+    const sample = exampleSample(undefined);
+    expect(sample.note).toContain("example");
+    expect(sample.note).toContain("npm run db:migrate:local");
+    expect(sample.note).toContain("--prompt");
   });
 
   it("reads CLI flags without touching D1", () => {

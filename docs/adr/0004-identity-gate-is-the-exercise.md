@@ -1,5 +1,5 @@
-# The identity gate is the workshop exercise
+# The identity gate was the workshop exercise
 
-The price read, the refusal, and phrasing a resolved price question ship working. The identity gate is deliberately unfinished. A real price question that also contains a name or a phone must not put those into the AstraFlow payload or into storage. Participants finish that gate with their own coding agent. Done means the failing test passes.
+Superseded. The identity gate is now finished: the wording call receives only the resolved public price facts, and the raw visitor text is never sent. `test/exercise/identity-gate.test.ts` holds the check.
 
-Shipping the gate already finished was rejected because the session would only demo a completed product. A TODO comment was rejected because a coding agent can mark it done without changing what the model receives.
+It was first left unfinished so participants could complete it. The showcase app has to work end to end first, so the gate shipped complete. A copy with the gate removed can still be handed out later as an exercise.

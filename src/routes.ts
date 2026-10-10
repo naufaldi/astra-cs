@@ -35,6 +35,7 @@ export type AppBindings = {
   ASSETS: { fetch(request: Request): Promise<Response> };
   ASTRAFLOW_API_KEY?: string;
   ASTRAFLOW_MODEL?: string;
+  ASTRAFLOW_THINKING?: string;
   WORKSHOP_KEY?: string;
 };
 
@@ -101,6 +102,8 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
     writeHandoff: (row) => insertHandoff(env.DB, row),
     apiKey: env.ASTRAFLOW_API_KEY,
     model: env.ASTRAFLOW_MODEL,
+    thinking: env.ASTRAFLOW_THINKING,
+    tenantId,
     fetchImpl: guardedFetch(env.ASTRAFLOW_API_KEY),
     creditsRemaining: balance,
   });
@@ -120,6 +123,7 @@ async function handleChat(request: Request, env: AppBindings): Promise<Response>
     reply: result.reply,
     draft: result.draft,
     outcome: result.outcome,
+    wording: result.wording,
   }, { status });
 }
 

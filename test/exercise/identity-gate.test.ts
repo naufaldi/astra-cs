@@ -25,4 +25,23 @@ describe("identity gate", () => {
     expect(stored).not.toContain("Budi");
     expect(stored).not.toContain("081234567890");
   });
+
+  it("sends only the resolved facts to the wording call", async () => {
+    const result = await handleVisitorMessage({
+      text: "What is the price of rice in Aceh? Call me on +62 812 3456 7890",
+      draft: emptyDraft(),
+      readTable: (commodityId, dateToken) => readPriceTable({ source: "mock", commodityId, dateToken }),
+      writeHandoff: async () => undefined,
+      now: new Date("2026-10-06T03:00:00.000Z"),
+      requestId: "req-phone",
+    });
+    const user = result.wordingPayload?.messages[1]?.content ?? "";
+    expect(JSON.parse(user)).toEqual({
+      komoditas: "Beras",
+      tanggal: "2026-10-05",
+      satuan: "kg",
+      baris: { provinsi: "Aceh", harga: 15700, selisihRataRata: -50 },
+    });
+    expect(JSON.stringify(result.wordingPayload)).not.toContain("812");
+  });
 });

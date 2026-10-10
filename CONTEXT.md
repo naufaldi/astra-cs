@@ -2,7 +2,7 @@
 
 The conversation a visitor has with the support agent about Monitor Pangan. The agent answers from exactly one price table, in Indonesian, and names the trading date. It never calls that price today. A visitor who states a claimed price gets a handoff record. Our server stores only that record.
 
-Visitor identity never reaches a wording call, the session draft, the request log, or the handoff record. The price path, the refusal, and the handoff ship as the product. The check that identity never reaches a wording call is left unfinished on purpose, so a workshop participant can complete it.
+Visitor identity never reaches a wording call, the session draft, the request log, or the handoff record. The wording call receives only resolved public price facts. The raw visitor text only picks the reply language, and it is never sent.
 
 Decisions that explain why live in `docs/adr/`.
 
@@ -81,7 +81,7 @@ The agent's reply when it will not phrase a price. AstraFlow is not called. This
 _Avoid_: Error, fallback, small talk
 
 **Outcome**:
-How a request ended: answered, refusal, handoff, or unread. A written handoff record makes it handoff, even when a price was also phrased. Answered means a price was phrased and no handoff was written. Unread means the price table could not be read and was not in the price cache. Every other request that does not phrase a price is a refusal.
+How a request ended: answered, refusal, handoff, or unread. A written handoff record makes it handoff, even when a price was also phrased. Answered means a price was phrased and no handoff was written. A template answer after a wording failure still counts as answered. Unread means the price table could not be read and was not in the price cache. Every other request that does not phrase a price is a refusal.
 _Avoid_: Status code, error
 
 **Request log**:

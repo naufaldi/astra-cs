@@ -64,12 +64,10 @@ export function estimateCost(
   usage: { promptTokens: number; completionTokens: number },
   isPeak: boolean,
 ): { estCostUsd: number; estCostIdr: number } {
-  const multiplier = isPeak ? 2 : 1;
-  const rate = modelPrice.offPeak;
+  const rate = isPeak ? modelPrice.peak : modelPrice.offPeak;
   const usd =
-    ((usage.promptTokens / 1_000_000) * rate.inputPerMillionUsd +
-      (usage.completionTokens / 1_000_000) * rate.outputPerMillionUsd) *
-    multiplier;
+    (usage.promptTokens / 1_000_000) * rate.inputPerMillionUsd +
+    (usage.completionTokens / 1_000_000) * rate.outputPerMillionUsd;
   const estCostUsd = Math.round(usd * 1e8) / 1e8;
   return { estCostUsd, estCostIdr: Math.round(estCostUsd * modelPrice.idrPerUsd) };
 }

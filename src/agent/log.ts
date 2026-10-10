@@ -11,6 +11,7 @@ export function formatRequestLog(line: RequestLog): string {
     priceReadMs: line.priceReadMs,
     wordingMs: line.wordingMs,
     errorClass: line.errorClass,
+    wordingPath: line.wordingPath,
     ...(line.upstreamClass
       ? { upstreamClass: line.upstreamClass, upstreamMessage: line.upstreamMessage ?? "" }
       : {}),

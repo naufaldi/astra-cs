@@ -4,6 +4,7 @@ import { handleFetch } from "./routes.js";
 type WorkerEnv = Env & {
   ASTRAFLOW_API_KEY?: string;
   ASTRAFLOW_MODEL?: string;
+  ASTRAFLOW_THINKING?: string;
   WORKSHOP_KEY?: string;
 };
 

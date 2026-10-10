@@ -6,18 +6,11 @@ import type { PhraseFacts } from "./select.js";
 export type WordingMessage = { role: "system" | "user"; content: string };
 export type WordingPayload = { messages: WordingMessage[] };
 
-const indonesianPrompt =
-  "Susun satu kalimat bahasa Indonesia hanya dari fakta harga yang diberikan. Sebut tanggal perdagangan. Jangan menyebut harga itu sebagai harga hari ini. Jangan menambah angka. Jangan menulis baris sumber.";
-
-const englishPrompt =
-  "Write one English sentence using only the price facts given. Name the trading date. Do not call it today's price. Do not add numbers. Do not add a source line.";
-
-function promptFor(language: ReplyLanguage): string {
-  return language === "en" ? englishPrompt : indonesianPrompt;
-}
-
 /** Astra Flow model used when `ASTRAFLOW_MODEL` is unset or blank. */
 export const defaultAstraFlowModel = "deepseek-v4.1-flash";
+
+/** How long one wording call may run before the template answers instead. */
+export const wordingTimeoutMs = 25_000;
 
 /** A wording call that Astra Flow did not complete. The message is the upstream error, not visitor text. */
 export class WordingUnavailable extends Error {
@@ -32,16 +25,39 @@ export class WordingUnavailable extends Error {
   }
 }
 
-/** Build the AstraFlow payload from resolved facts. A name or phone is still copied through. */
+const indonesianPrompt =
+  "Susun satu kalimat bahasa Indonesia hanya dari fakta harga yang diberikan. Sebut tanggal perdagangan. Tulis harga dengan awalan Rp, contoh Rp15.600. Jangan menyebut harga itu sebagai harga hari ini. Jangan menambah angka. Jangan menulis baris sumber.";
+
+const englishPrompt =
+  "Write one sentence in English using only the price facts given. Name the trading date. Write prices with the Rp prefix, for example Rp15,600. Do not call it today's price. Do not add numbers. Do not add a source line.";
+
+/** Build the AstraFlow payload from the resolved facts only. The visitor text never goes in. */
 export function buildWordingPayload(facts: PhraseFacts, rawText: string): WordingPayload {
-  const factText = JSON.stringify(wordingFacts(facts));
-  const user = containsIdentity(rawText) ? `${factText}\n${rawText}` : factText;
+  const language = replyLanguage(rawText);
   return {
     messages: [
-      { role: "system", content: promptFor(replyLanguage(rawText)) },
-      { role: "user", content: user },
+      { role: "system", content: language === "en" ? englishPrompt : indonesianPrompt },
+      { role: "user", content: JSON.stringify(wordingFacts(facts)) },
     ],
   };
+}
+
+function wordingFacts(facts: PhraseFacts): Record<string, unknown> {
+  const base = { komoditas: facts.commodity, tanggal: facts.date, satuan: facts.unit };
+  switch (facts.kind) {
+    case "province":
+      return { ...base, baris: facts.row };
+    case "compare":
+      return { ...base, kiri: facts.left, kanan: facts.right };
+    case "rank":
+      return { ...base, pemenang: facts.row, jumlah: facts.count, arah: facts.direction };
+    case "versusAverage":
+      return { ...base, baris: facts.row, rataRata: facts.average };
+    default: {
+      const unexpected: never = facts;
+      throw new Error(`unexpected facts ${JSON.stringify(unexpected)}`);
+    }
+  }
 }
 
 /** Phrase a resolved question without calling a model. */
@@ -92,11 +108,26 @@ function phraseEnglish(facts: PhraseFacts): string {
 
 export type PhraseResult = { reply: string; payload: WordingPayload; calledAstra: boolean; usage: TokenUsage };
 
+function resolvedModel(model: string | undefined): string {
+  const override = model?.trim();
+  return override ? override : defaultAstraFlowModel;
+}
+
 /** Phrase with AstraFlow only when an API key is present. Otherwise use the fact template. */
 export async function phraseResolved(
   facts: PhraseFacts,
   rawText: string,
-  options: { apiKey?: string; model?: string; fetchImpl?: typeof fetch; now?: Date },
+  options: {
+    apiKey?: string;
+    model?: string;
+    fetchImpl?: typeof fetch;
+    now?: Date;
+    /** `on` keeps the model's reasoning. Anything else turns it off to save tokens. */
+    thinking?: string;
+    /** Sent as the gateway `user` field so calls can be filtered by tenant. */
+    user?: string;
+    timeoutMs?: number;
+  },
 ): Promise<PhraseResult> {
   const language = replyLanguage(rawText);
   const payload = buildWordingPayload(facts, rawText);
@@ -116,11 +147,14 @@ export async function phraseResolved(
         model: resolvedModel(options.model),
         messages: payload.messages,
         stream: false,
+        ...(options.thinking?.trim().toLowerCase() === "on" ? {} : { thinking: { type: "disabled" } }),
+        ...(options.user ? { user: options.user } : {}),
       }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? wordingTimeoutMs),
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "network";
-    throw new WordingUnavailable("network", sanitizeUpstreamMessage(message));
+    const timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError");
+    throw new WordingUnavailable(timedOut ? "timeout" : "network", error instanceof Error ? error.message : "network");
   }
   if (!response.ok) {
     throw await wordingFailure(response);
@@ -132,95 +166,6 @@ export async function phraseResolved(
   }
   // Workshop: usage. Remove with src/workshop/token-usage.ts.
   return { reply, payload, calledAstra: true, usage: readTokenUsage(body, options.now ?? new Date()) };
-}
-
-function resolvedModel(model: string | undefined): string {
-  const override = model?.trim();
-  return override ? override : defaultAstraFlowModel;
-}
-
-async function wordingFailure(response: Response): Promise<WordingUnavailable> {
-  const fallbackClass = `http_${response.status}`;
-  let text = "";
-  try {
-    text = await response.text();
-  } catch {
-    return new WordingUnavailable(fallbackClass, `HTTP ${response.status}`);
-  }
-  const parsed = upstreamError(text);
-  if (!parsed) {
-    return new WordingUnavailable(fallbackClass, `HTTP ${response.status}`);
-  }
-  return new WordingUnavailable(parsed.className, sanitizeUpstreamMessage(parsed.message));
-}
-
-function upstreamError(text: string): { className: string; message: string } | null {
-  let body: unknown;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof body !== "object" || body === null || !("error" in body)) {
-    return null;
-  }
-  const error = (body as { error: unknown }).error;
-  if (typeof error !== "object" || error === null) {
-    return null;
-  }
-  const record = error as Record<string, unknown>;
-  const code = typeof record.code === "string" && record.code.trim() !== "" ? record.code : null;
-  const type = typeof record.type === "string" && record.type.trim() !== "" ? record.type : null;
-  const message = typeof record.message === "string" && record.message.trim() !== "" ? record.message : null;
-  if (!message) {
-    return null;
-  }
-  return { className: code ?? type ?? "upstream", message };
-}
-
-function sanitizeUpstreamMessage(message: string): string {
-  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\s+/g, " ").trim().slice(0, 300);
-}
-
-function wordingFacts(facts: PhraseFacts): Record<string, unknown> {
-  switch (facts.kind) {
-    case "province":
-      return { komoditas: facts.commodity, tanggal: facts.date, satuan: facts.unit, baris: facts.row };
-    case "compare":
-      return {
-        komoditas: facts.commodity,
-        tanggal: facts.date,
-        satuan: facts.unit,
-        kiri: facts.left,
-        kanan: facts.right,
-      };
-    case "rank":
-      return {
-        komoditas: facts.commodity,
-        tanggal: facts.date,
-        satuan: facts.unit,
-        pemenang: facts.row,
-        jumlah: facts.count,
-        arah: facts.direction,
-      };
-    case "versusAverage":
-      return {
-        komoditas: facts.commodity,
-        tanggal: facts.date,
-        satuan: facts.unit,
-        baris: facts.row,
-        rataRata: facts.average,
-      };
-    default: {
-      const unexpected: never = facts;
-      throw new Error(`unexpected facts ${JSON.stringify(unexpected)}`);
-    }
-  }
-}
-
-function containsIdentity(text: string): boolean {
-  const compact = text.replace(/[\s-]/g, "");
-  return /(?:\+62|0)\d{8,13}/.test(compact) || /nama saya\s+[A-Za-z]+/i.test(text);
 }
 
 function completionText(body: unknown): string | null {
@@ -241,4 +186,20 @@ function completionText(body: unknown): string | null {
   }
   const content = (message as { content: unknown }).content;
   return typeof content === "string" && content.trim() !== "" ? content : null;
+}
+
+/** Turn a 4xx or 5xx into an upstream class and message. The key never reaches the log. */
+async function wordingFailure(response: Response): Promise<WordingUnavailable> {
+  const fallback = new WordingUnavailable(`http_${response.status}`, `HTTP ${response.status}`);
+  const text = await response.text().catch(() => "");
+  try {
+    const error = (JSON.parse(text) as { error?: { code?: string; type?: string; message?: string } }).error;
+    if (!error?.message) {
+      return fallback;
+    }
+    const message = error.message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 300);
+    return new WordingUnavailable(error.code || error.type || "upstream", message);
+  } catch {
+    return fallback;
+  }
 }

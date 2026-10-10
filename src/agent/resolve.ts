@@ -93,7 +93,12 @@ export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
     return stop("ambiguous_commodity", replies[language].ambiguous);
   }
   const dateToken = findDateToken(normalized);
-  const draftCommodityId = draft.commodity ? commodityIdByName(draft.commodity) : undefined;
+  const versus = /rata-rata|rata rata|\baverage\b/.test(normalized);
+  const rankHigh = /termahal|tertinggi|paling mahal|\bhighest\b|most expensive/.test(normalized);
+  const rankLow = /termurah|terendah|paling murah|\blowest\b|\bcheapest\b/.test(normalized);
+  const readsLikeFollowUp =
+    asksPrice || provinces.length > 0 || versus || rankHigh || rankLow || dateToken !== "terbaru";
+  const draftCommodityId = draft.commodity && readsLikeFollowUp ? commodityIdByName(draft.commodity) : undefined;
   const commodityId = commodity.status === "one" ? commodity.id : draftCommodityId;
 
   if (!commodityId) {
@@ -106,9 +111,6 @@ export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
   if (provinces.length > 2) {
     return stop("need_province", replies[language].oneOrTwo);
   }
-  const versus = /rata-rata|rata rata|\baverage\b/.test(normalized);
-  const rankHigh = /termahal|tertinggi|paling mahal|\bhighest\b|most expensive/.test(normalized);
-  const rankLow = /termurah|terendah|paling murah|\blowest\b|\bcheapest\b/.test(normalized);
   let selection: Selection;
   if (provinces.length === 2) {
     selection = { kind: "compare", left: provinces[0] ?? "", right: provinces[1] ?? "" };
