@@ -74,6 +74,13 @@ export async function handleVisitorMessage(input: {
   }
   if (resolved.type === "claim") {
     const filled = await fillClaim(resolved, input.readTable);
+    const province = filled.province ?? "tidak disebut";
+    await input.writeHandoff({
+      commodity: filled.commodity,
+      province,
+      displayedPrice: filled.displayedPrice ?? 0,
+      claimedPrice: resolved.claimedPrice,
+    });
     const reply = filled.province
       ? recordedClaim(language, filled.commodity, filled.province)
       : reviewClaim(language, filled.commodity, resolved.claimedPrice);

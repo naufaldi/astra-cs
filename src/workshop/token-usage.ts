@@ -106,9 +106,9 @@ function extractUsage(body: unknown): {
   }
   const record = usage as Record<string, unknown>;
   return {
-    promptTokens: numberField(record, "promptTokens"),
-    completionTokens: numberField(record, "completionTokens"),
-    totalTokens: numberField(record, "totalTokens"),
+    promptTokens: numberField(record, "prompt_tokens"),
+    completionTokens: numberField(record, "completion_tokens"),
+    totalTokens: numberField(record, "total_tokens"),
     reasoningTokens: reasoningTokensFrom(record),
   };
 }

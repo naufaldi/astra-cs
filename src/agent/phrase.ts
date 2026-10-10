@@ -7,7 +7,7 @@ export type WordingMessage = { role: "system" | "user"; content: string };
 export type WordingPayload = { messages: WordingMessage[] };
 
 /** Astra Flow model used when `ASTRAFLOW_MODEL` is unset or blank. */
-export const defaultAstraFlowModel = "deepseek-ai/DeepSeek-V3";
+export const defaultAstraFlowModel = "deepseek-v4.1-flash";
 
 /** How long one wording call may run before the template answers instead. */
 export const wordingTimeoutMs = 25_000;
@@ -83,6 +83,11 @@ function phraseEnglish(facts: PhraseFacts): string {
 
 export type PhraseResult = { reply: string; payload: WordingPayload; calledAstra: boolean; usage: TokenUsage };
 
+function resolvedModel(model: string | undefined): string {
+  const override = model?.trim();
+  return override ? override : defaultAstraFlowModel;
+}
+
 /** Phrase with AstraFlow only when an API key is present. Otherwise use the fact template. */
 export async function phraseResolved(
   facts: PhraseFacts,
@@ -105,14 +110,14 @@ export async function phraseResolved(
     return { reply: phraseFromFacts(facts, language), payload, calledAstra: false, usage: zeroUsage() };
   }
   const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl("https://api-sg.umodelverse.ai/v1/completions", {
+  const response = await fetchImpl("https://api-sg.umodelverse.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       authorization: `Bearer ${options.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "deepseek-ai/DeepSeek-V3",
+      model: resolvedModel(options.model),
       messages: payload.messages,
       stream: false,
       ...(options.thinking?.trim().toLowerCase() === "on" ? {} : { thinking: { type: "disabled" } }),

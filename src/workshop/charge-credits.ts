@@ -10,7 +10,7 @@
  */
 
 import type { HandoffDb } from "../agent/handoff.js";
-import { TOKENS_PER_CREDIT, tokensToCredits, tokensToSen } from "./credit-price.js";
+import { GATE_TOKENS, TOKENS_PER_CREDIT, tokensToCredits, tokensToSen } from "./credit-price.js";
 import type { TokenUsage } from "./token-usage.js";
 
 export type ChargePlan = {
@@ -22,7 +22,7 @@ export type ChargePlan = {
 
 /** True when the tenant may start a model call. Under 2 credits, the route returns 402. */
 export function passesCreditGate(balanceTokens: number): boolean {
-  return balanceTokens > 0;
+  return balanceTokens >= GATE_TOKENS;
 }
 
 /** How many tokens to deduct. The balance floors at zero. */
