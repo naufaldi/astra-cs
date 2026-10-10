@@ -1,5 +1,6 @@
 import type { SessionDraft } from "../domain.js";
 import {
+  ambiguousVariants,
   commodityById,
   commodityIdByName,
   matchCommodity,
@@ -8,7 +9,7 @@ import {
   type NameHit,
 } from "../mcp/published-names.js";
 import { extraGuardrail } from "./extra-guardrail.js";
-import { replyLanguage, replies } from "./language.js";
+import { ambiguousCommodityReply, replyLanguage, replies } from "./language.js";
 
 export type Selection =
   | { kind: "province"; province: string }
@@ -40,6 +41,7 @@ export type ResolvedStop = {
   reply: string;
   commodity: string | null;
   tradingDate: string | null;
+  draft?: SessionDraft;
 };
 
 export type Resolution = ResolvedRead | ResolvedClaim | ResolvedStop;
@@ -90,7 +92,10 @@ export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
     if (commodity.reason === "cross") {
       return stop("cross_commodity", replies[language].cross);
     }
-    return stop("ambiguous_commodity", replies[language].ambiguous);
+    if (provinces.length > 2) {
+      return stop("need_province", replies[language].oneOrTwo);
+    }
+    return clarifyCommodity(text, draft, provinces, language);
   }
   const dateToken = findDateToken(normalized);
   const versus = /rata-rata|rata rata|\baverage\b/.test(normalized);
@@ -108,24 +113,54 @@ export function resolveQuestion(text: string, draft: SessionDraft): Resolution {
     return stop("offtopic", replies[language].offtopic);
   }
 
-  if (provinces.length > 2) {
+  const selectionProvinces = provinces.length > 0 || rankHigh || rankLow ? provinces : draft.provinces;
+  if (selectionProvinces.length > 2) {
     return stop("need_province", replies[language].oneOrTwo);
   }
   let selection: Selection;
-  if (provinces.length === 2) {
-    selection = { kind: "compare", left: provinces[0] ?? "", right: provinces[1] ?? "" };
-  } else if (provinces.length === 1 && versus) {
-    selection = { kind: "versusAverage", province: provinces[0] ?? "" };
-  } else if (provinces.length === 1) {
-    selection = { kind: "province", province: provinces[0] ?? "" };
+  if (selectionProvinces.length === 2) {
+    selection = { kind: "compare", left: selectionProvinces[0] ?? "", right: selectionProvinces[1] ?? "" };
+  } else if (selectionProvinces.length === 1 && versus) {
+    selection = { kind: "versusAverage", province: selectionProvinces[0] ?? "" };
+  } else if (selectionProvinces.length === 1) {
+    selection = { kind: "province", province: selectionProvinces[0] ?? "" };
   } else if (rankHigh) {
     selection = { kind: "rank", direction: "high" };
   } else if (rankLow) {
     selection = { kind: "rank", direction: "low" };
   } else {
-    return stop("need_province", replies[language].needProvince);
+    return stop("need_province", replies[language].needProvince, {
+      ...draft,
+      commodity: commodityById(commodityId)?.name ?? draft.commodity,
+      claimedPrice: null,
+    });
   }
   return { type: "read", commodityId, dateToken, selection, claimedPrice };
+}
+
+/** A family word such as cabai keeps the province and asks for a published variant. */
+function clarifyCommodity(
+  text: string,
+  draft: SessionDraft,
+  provinces: string[],
+  language: ReturnType<typeof replyLanguage>,
+): ResolvedStop {
+  const variants = ambiguousVariants(text);
+  const reply =
+    variants.length > 0
+      ? ambiguousCommodityReply(
+          language,
+          variants.map((item) => item.name),
+          provinces,
+        )
+      : replies[language].ambiguous;
+  return stop("ambiguous_commodity", reply, {
+    commodity: null,
+    provinces: provinces.length > 0 ? provinces : draft.provinces,
+    tradingDate: draft.tradingDate,
+    facts: provinces.length > 0 ? [] : draft.facts,
+    claimedPrice: null,
+  });
 }
 
 /** A stated price that is not also "what does the table say in this province". */
@@ -186,8 +221,9 @@ function isTrend(text: string): boolean {
 function stop(
   errorClass: ResolvedStop["errorClass"],
   reply: string,
+  draft?: SessionDraft,
 ): ResolvedStop {
-  return { type: "stop", outcome: "refusal", errorClass, reply, commodity: null, tradingDate: null };
+  return { type: "stop", outcome: "refusal", errorClass, reply, commodity: null, tradingDate: null, draft };
 }
 
 function hasPriceIntent(text: string): boolean {

@@ -60,7 +60,7 @@ export async function handleVisitorMessage(input: {
   if (resolved.type === "stop") {
     return finish({
       reply: resolved.reply,
-      draft,
+      draft: resolved.draft ?? draft,
       outcome: resolved.outcome,
       commodity: resolved.commodity,
       tradingDate: resolved.tradingDate,
