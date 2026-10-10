@@ -106,6 +106,20 @@ export function sourceCitation(language: ReplyLanguage, date: string): string {
   return `Sumber: Monitor Pangan (monitor.naufaldi.com), data ${date}`;
 }
 
+/** Ask which published variant, naming only rows that exist on the price table. */
+export function ambiguousCommodityReply(
+  language: ReplyLanguage,
+  names: readonly string[],
+  provinces: readonly string[],
+): string {
+  const list = joinChoices(language, names);
+  const where = provinceLead(language, provinces);
+  if (language === "en") {
+    return where ? `${where}, name one: ${list}.` : `Name one: ${list}.`;
+  }
+  return where ? `${where}, sebutkan salah satu: ${list}.` : `Sebutkan salah satu: ${list}.`;
+}
+
 export function missingProvincePrice(language: ReplyLanguage, commodity: string, date: string): string {
   if (language === "en") {
     return `${commodity} has no price for that province on trading date ${date}.`;
@@ -133,6 +147,29 @@ export function reviewClaim(language: ReplyLanguage, commodity: string, amount: 
     return `Klaim harga sebesar ${money} sudah dicatat. Petugas akan meninjaunya karena komoditas dan provinsinya belum disebut.`;
   }
   return `Klaim harga ${commodity} sebesar ${money} sudah dicatat. Petugas akan meninjaunya karena provinsinya belum disebut.`;
+}
+
+function joinChoices(language: ReplyLanguage, names: readonly string[]): string {
+  const conjunction = language === "en" ? "or" : "atau";
+  if (names.length <= 1) {
+    return names[0] ?? "";
+  }
+  if (names.length === 2) {
+    return `${names[0]} ${conjunction} ${names[1]}`;
+  }
+  const head = names.slice(0, -1).join(", ");
+  return `${head}, ${conjunction} ${names[names.length - 1]}`;
+}
+
+function provinceLead(language: ReplyLanguage, provinces: readonly string[]): string | null {
+  const [first, second] = provinces;
+  if (provinces.length === 1 && first) {
+    return language === "en" ? `In ${first}` : `Di ${first}`;
+  }
+  if (provinces.length === 2 && first && second) {
+    return language === "en" ? `In ${first} and ${second}` : `Di ${first} dan ${second}`;
+  }
+  return null;
 }
 
 function countWords(text: string, words: readonly string[]): number {
